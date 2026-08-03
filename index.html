@@ -143,7 +143,7 @@
     <div class="overlay-screen" id="loginScreen">
         <div class="overlay-box">
             <h2 style="color:#2196F3;">端末情報登録</h2>
-            <p>携帯電話番号、メールアドレス、利用者番号を登録してください</p>
+            <p>読取端末IDで制限されたQRツインを読む場合に登録してください。<br>通常の読み取りには登録は不要です。</p>
             <input type="text" id="loginPhoneInput" placeholder="携帯電話番号" style="font-size:1rem;" />
             <input type="text" id="loginEmailInput" placeholder="メールアドレス" style="font-size:1rem;" />
             <input type="text" id="loginUserNumberInput" placeholder="利用者番号" style="font-size:1rem;" />
@@ -152,6 +152,8 @@
                 端末情報を記憶する
             </label>
             <button class="btn" onclick="doLogin()">登録</button>
+            <button class="btn secondary" onclick="closeTerminalScreen()">閉じる</button>
+            <button class="btn secondary" style="background-color:#7f1d1d; border-color:#a33; font-size:0.85rem;" onclick="doLogout()">登録を解除</button>
         </div>
     </div>
 
@@ -241,7 +243,7 @@
                     <label id="normalResultLabel1" style="color:#00E676;">第1QR</label>
                     <div class="text" id="resText1">-</div>
                 </div>
-                <div class="qr-data-card" style="border-color: #29B6F6; margin-top:12px;">
+                <div class="qr-data-card" id="normalResultCard2" style="border-color: #29B6F6; margin-top:12px;">
                     <label id="normalResultLabel2" style="color:#29B6F6;">第2QR</label>
                     <div class="text" id="resText2">-</div>
                 </div>
@@ -454,6 +456,35 @@
         let currentDevicePosition = null; // {lat, lon}
         let watchPositionId = null;
 
+        // ★ 読取位置チェックの失敗理由。GPS未取得とQR位置不一致を区別してメッセージを出し分ける。
+        //    'mismatch'    = 現在位置は取れたが、QR指定位置と一致しない
+        //    'denied'      = 位置情報の利用が許可されていない
+        //    'off'         = 位置情報サービスOFF等で取得不能
+        //    'timeout'     = 取得タイムアウト
+        //    'unsupported' = ブラウザが位置情報に非対応
+        //    'acquiring'   = エラーは出ていないが、まだ測位できていない（GPS ONでも数秒かかる）
+        let lastLocationFailReason = null;
+
+        function noteGeolocationError(err) {
+            if (err && err.code === 1) lastLocationFailReason = 'denied';
+            else if (err && err.code === 3) lastLocationFailReason = 'timeout';
+            else lastLocationFailReason = 'off';
+        }
+
+        function locationFailMessage() {
+            switch (lastLocationFailReason) {
+                case 'denied':
+                case 'off':
+                case 'timeout':
+                case 'unsupported':
+                    return 'GPSをONにしてください';
+                case 'acquiring':
+                    return '現在位置を取得中です。しばらくしてからもう一度お試しください';
+                default:
+                    return '読取位置が一致しません';
+            }
+        }
+
         function updateCurrentDevicePosition(pos) {
             const nextPosition = { lat: pos.coords.latitude, lon: pos.coords.longitude };
             if (!currentDevicePosition ||
@@ -471,9 +502,11 @@
             if (watchPositionId !== null) return;
             watchPositionId = navigator.geolocation.watchPosition(
                 function(pos) {
+                    lastLocationFailReason = null;
                     updateCurrentDevicePosition(pos);
                 },
                 function(err) {
+                    noteGeolocationError(err);
                     console.log('Geolocation error:', err.message);
                 },
                 { enableHighAccuracy: true, maximumAge: 5000 }
@@ -488,18 +521,22 @@
             if (!currentDevicePosition) {
                 // GPS未取得の場合、同期的に取得を試みる
                 return new Promise(function(resolve) {
-                    if (!navigator.geolocation) { resolve(false); return; }
+                    if (!navigator.geolocation) { lastLocationFailReason = 'unsupported'; resolve(false); return; }
                     navigator.geolocation.getCurrentPosition(
                         function(pos) {
                             currentDevicePosition = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-                            resolve(matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon));
+                            const ok = matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon);
+                            lastLocationFailReason = ok ? null : 'mismatch';
+                            resolve(ok);
                         },
-                        function() { resolve(false); },
+                        function(err) { noteGeolocationError(err); resolve(false); },
                         { enableHighAccuracy: true, timeout: 10000 }
                     );
                 });
             }
-            return Promise.resolve(matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon));
+            const ok = matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon);
+            lastLocationFailReason = ok ? null : 'mismatch';
+            return Promise.resolve(ok);
         }
 
         function matchLocation(qrLat, qrLon, devLat, devLon) {
@@ -822,7 +859,7 @@
         function ensureReadCountAllowed(qr) {
             const check = checkReadCountLimit(qr);
             if (check.ok) return true;
-            showResultScreen(null, check.message || '読取回数がリミットに達しました');
+            showResultScreen(null, check.message || '読取回数がリミットに達しました', qr);
             return false;
         }
 
@@ -845,6 +882,16 @@
             document.getElementById('loginScreen').style.display = 'none';
         }
 
+        // 端末情報画面を開く（既存の入力値は残したまま＝「変更」用途）
+        function openTerminalScreen() {
+            document.getElementById('loginScreen').style.display = 'flex';
+        }
+
+        // 端末情報画面を閉じる（未登録のままでも通常のQRツインは読める）
+        function closeTerminalScreen() {
+            document.getElementById('loginScreen').style.display = 'none';
+        }
+
         // 登録解除処理
         function doLogout() {
             currentTerminalHashes = [];
@@ -852,10 +899,12 @@
             localStorage.removeItem('qrtwin_reader_remember');
             setTerminalProfile({});
             document.getElementById('rememberReaderId').checked = false;
-            document.getElementById('loginScreen').style.display = 'flex';
+            closeTerminalScreen();
         }
 
-        // 起動時: 記憶された端末情報があれば自動登録
+        // 起動時: 記憶された端末情報があれば自動登録。
+        // ★ 未登録でも端末情報画面は出さない（読取端末ID制限のないQRツインは登録なしで読めるため）。
+        //   登録／変更は「端末情報を変更」ボタンから明示的に開く。
         (function initLogin() {
             const saved = localStorage.getItem('qrtwin_terminal_profile');
             const remember = localStorage.getItem('qrtwin_reader_remember');
@@ -865,12 +914,10 @@
                     setTerminalProfile(profile);
                     currentTerminalHashes = buildTerminalHashes(getTerminalProfile());
                     document.getElementById('rememberReaderId').checked = true;
-                    if (currentTerminalHashes.length) return;
                 } catch (e) {
                     localStorage.removeItem('qrtwin_terminal_profile');
                 }
             }
-            document.getElementById('loginScreen').style.display = 'flex';
         })();
 
         const SCAN_INTERVAL_MS = 40;
@@ -3888,9 +3935,9 @@
             }
         }
 
-        // ログアウトボタン
+        // 端末情報を変更ボタン（登録済みなら現在値のまま画面を開く）
         document.getElementById('logoutBtn').addEventListener('click', () => {
-            doLogout();
+            openTerminalScreen();
         });
 
         // モード選択ボタン
@@ -4581,7 +4628,46 @@
         }
 
         // errorMessage: 読取期限切れ・読取端末ID不一致時のエラーメッセージ
-        function showResultScreen(digitalSignResult = null, errorMessage = null) {
+        // ★ 読取制限NG時に表示する第1QR。firstQR 形式（.text）と jsQR 生結果（.data）の両方を受ける。
+        function extractQ1Text(q1Like) {
+            if (!q1Like) return null;
+            if (q1Like.text !== undefined && q1Like.text !== null) return q1Like.text;
+            if (q1Like.data !== undefined && q1Like.data !== null) return q1Like.data;
+            return null;
+        }
+
+        // ★ 通常のQRコードの読取結果を即座に表示する（第2QRを待たない）
+        function showPlainQrResult(text) {
+            if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+            isScanning = false;
+            isProcessing = false;
+            markScanCompleted('completed');
+            twinReadStartedAt = 0;
+
+            try { document.getElementById('cameraControls').style.display = 'none'; } catch (e) {}
+
+            const normalSection = document.getElementById('normalResultSection');
+            const dsSection = document.getElementById('digitalSignResultSection');
+            const resultTitle = document.getElementById('resultTitle');
+            normalSection.style.display = '';
+            dsSection.style.display = 'none';
+            resultTitle.innerText = '読取結果';
+            resultTitle.style.color = '';
+
+            const label1El = document.getElementById('normalResultLabel1');
+            if (label1El) label1El.innerText = 'QRコード';
+            renderResultText('resText1', text);
+
+            // 通常QRは1個で完結するため、第2QRカードは非表示にする
+            const card2El = document.getElementById('normalResultCard2');
+            if (card2El) card2El.style.display = 'none';
+
+            renderScanDebugStats();
+            appendCurrentTrialToLog();
+            document.getElementById('resultScreen').style.display = 'flex';
+        }
+
+        function showResultScreen(digitalSignResult = null, errorMessage = null, q1ForError = null) {
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
 
             isScanning = false;
@@ -4599,14 +4685,20 @@
             const imgContainer = document.getElementById('dsImageContainer');
             const imgEl = document.getElementById('dsImage');
 
+            // ★ 通常QR表示で隠した第2QRカードを元に戻す（QRツイン表示では常に必要）
+            const card2El = document.getElementById('normalResultCard2');
+            if (card2El) card2El.style.display = '';
+
             if (errorMessage) {
-                // ★ エラーメッセージ表示（読取期限切れ・読取端末ID不一致）
+                // ★ エラーメッセージ表示（読取期限切れ・読取端末ID不一致・読取位置不一致・読取回数超過 等）
+                //   第1QRは公開データ（生成側は常に applyXor:false）なので、
+                //   読取制限を満たさない場合でも内容を表示する。伏せるのは第2QR（暗号化部）のみ。
                 normalSection.style.display = '';
                 dsSection.style.display = 'none';
                 resultTitle.innerText = errorMessage;
                 resultTitle.style.color = '#F44336';
-                renderResultText('resText1', null);
-                renderResultText('resText2', null);
+                renderResultText('resText1', extractQ1Text(q1ForError) || extractQ1Text(firstQR));
+                renderResultText('resText2', null, '読取制限により非表示');
                 const label1El = document.getElementById('normalResultLabel1');
                 const label2El = document.getElementById('normalResultLabel2');
                 if (label1El) label1El.innerText = '第1QR';
@@ -5330,6 +5422,57 @@
             return getManagementCode32FromParts(qr.managementCode, qr.managementFlags16);
         }
 
+        // ============================================================
+        //  ★ 通常のQRコード（QRツインでない）の判定
+        //
+        //  jsQR の decode() は終端ビットの直後32ビットを無条件に管理部として読む。
+        //  通常QRではそこに埋め草コード語（0xEC/0x11 の繰り返し）が入っているため、
+        //  「管理部が無い」ではなく「意味のない管理部が読めた」状態になる。
+        //  そこで、生成側が必ず満たす構造的な制約を検査して見分ける。
+        //
+        //  生成側の不変条件（QR Twin Generator Ver3.0）:
+        //    qrNo        : 0 または 1 のみ（buildMgmt32(0,1) / buildMgmt32(1,2)）
+        //    colorCount  : 0=通常2色 / 2=3領域化 / 3=4領域化（1は未使用）
+        //    colorSpec   : 2色→0xA9 固定 / 3領域化→4色ちょうど / 4領域化→0xFF 固定
+        //    regionIndex : 常に 0（buildMgmt32 でハードコード）
+        //    予約2ビット  : 常に 0（buildMgmt32FromParts の b16）
+        //
+        //  この規則は、埋め草を読んだ場合の8通りのビット境界すべてを弾く（検証済み）。
+        // ============================================================
+        const PLAIN_QR_COLOR_SPEC_2COLOR = 0xA9;   // getDefaultColorBits8() = [1,0,1,0,1,0,0,1]
+        const PLAIN_QR_COLOR_SPEC_4REGION = 0xFF;  // 4領域化は全8色固定
+
+        function popcount8(v) {
+            let c = 0;
+            let x = v & 0xFF;
+            while (x) { c += x & 1; x >>>= 1; }
+            return c;
+        }
+
+        // 管理部が「生成ソフトが書いたもの」として妥当かを判定する。
+        // 妥当でなければ通常のQRコードとみなす。
+        function isPlainQrCode(qr) {
+            const m32 = getManagementCode32FromQr(qr);
+            if (m32 === null || m32 === undefined) return true; // 管理部が読めない＝通常QR
+
+            const high = (m32 >>> 16) & 0xFFFF;
+            const low = m32 & 0xFFFF;
+            const qrNo = (high >>> 14) & 0x3;
+            const colorCount = (high >>> 12) & 0x3;
+            const colorSpec = (high >>> 4) & 0xFF;
+            const regionIndex = high & 0x3;
+            const reserved = low & 0x3;
+
+            if (qrNo > 1) return true;
+            if (colorCount === 1) return true;
+            if (regionIndex !== 0) return true;
+            if (reserved !== 0) return true;
+            if (colorCount === 0 && colorSpec !== PLAIN_QR_COLOR_SPEC_2COLOR) return true;
+            if (colorCount === 2 && popcount8(colorSpec) !== 4) return true;
+            if (colorCount === 3 && colorSpec !== PLAIN_QR_COLOR_SPEC_4REGION) return true;
+            return false;
+        }
+
         function getQrNumber(qr) {
             const managementCode32 = getManagementCode32FromQr(qr);
             if (managementCode32 !== null) {
@@ -5739,6 +5882,9 @@
             if (qrNo !== null && zeroQrNo !== null && oneQrNo !== null && !zeroMatch && !oneMatch) return;
             // 第1QRの場合、読取期限・読取端末IDをチェック
             if (zeroMatch && zeroKey === 'qr1' && !target._expiryChecked) {
+                // ★ 読取制限NGでも第1QR（公開データ）は結果画面に表示するため、判定前に退避しておく。
+                //   制限NG時は下の return で target.qr1 が代入されないため、ここで保持する必要がある。
+                target._q1ForDisplay = qr;
                 if (qr.expiryExt32 !== undefined && !checkExpiry(qr.expiryExt32)) {
                     target._expiryFailed = true;
                     return;
@@ -5750,12 +5896,19 @@
                     }
                 }
                 if (qr.locationLatExt24 !== undefined && qr.locationLonExt24 !== undefined) {
-                    if (!currentDevicePosition || !matchLocation(
+                    if (!currentDevicePosition) {
+                        // まだ測位できていない。watchPosition がエラーを記録済みならその理由を優先する。
+                        if (!lastLocationFailReason) lastLocationFailReason = 'acquiring';
+                        target._locationFailed = true;
+                        return;
+                    }
+                    if (!matchLocation(
                         (qr.locationLatExt24 / 10000) - 90,
                         (qr.locationLonExt24 / 10000) - 180,
                         currentDevicePosition.lat,
                         currentDevicePosition.lon
                     )) {
+                        lastLocationFailReason = 'mismatch';
                         target._locationFailed = true;
                         return;
                     }
@@ -8491,14 +8644,14 @@
                                     // 読取期限チェック
                                     if (q1Found.expiryExt32 !== undefined && !checkExpiry(q1Found.expiryExt32)) {
                                         isScanning = false; isProcessing = false;
-                                        showResultScreen(null, "読み取りの有効期間が終了しました");
+                                        showResultScreen(null, "読み取りの有効期間が終了しました", q1Found);
                                         return;
                                     }
                                     // 読取端末IDチェック
                                     if (q1Found.readerIdExt32 !== undefined) {
                                         if (!matchesRegisteredTerminalId(q1Found.readerIdExt32)) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取端末IDが一致しません");
+                                            showResultScreen(null, "読取端末IDが一致しません", q1Found);
                                             return;
                                         }
                                     }
@@ -8507,7 +8660,7 @@
                                         const locMatch = await checkLocation(q1Found.locationLatExt24, q1Found.locationLonExt24);
                                         if (!locMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取位置が一致しません");
+                                            showResultScreen(null, locationFailMessage(), q1Found);
                                             return;
                                         }
                                     }
@@ -8516,7 +8669,7 @@
                                         const muniMatch = await checkMunicipality(q1Found.municipalityExt24);
                                         if (!muniMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません");
+                                            showResultScreen(null, "市町村コードが一致しません", q1Found);
                                             return;
                                         }
                                     }
@@ -8650,27 +8803,27 @@
                         // カラーモードの読取期限・読取端末IDチェック
                         if (colorScanResult._expiryFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, "読み取りの有効期間が終了しました");
+                            showResultScreen(null, "読み取りの有効期間が終了しました", colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._readerIdFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, "読取端末IDが一致しません");
+                            showResultScreen(null, "読取端末IDが一致しません", colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._locationFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, "読取位置が一致しません");
+                            showResultScreen(null, locationFailMessage(), colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._municipalityFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, "市町村コードが一致しません");
+                            showResultScreen(null, "市町村コードが一致しません", colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._readCountFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, colorScanResult._readCountMessage || "読取回数がリミットに達しました");
+                            showResultScreen(null, colorScanResult._readCountMessage || "読取回数がリミットに達しました", colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorCount === 4) {
@@ -9573,6 +9726,18 @@
                             : getManagementCode32FromParts(resultMgmt, item.managementFlags16);
                         const mgmtInfo = parseStandardMgmt(mgmtCode32);
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
+
+                        // ★ 通常のQRコード（QRツインでない）は、1個復号できた時点で即座に結果表示する。
+                        //   第2QRの探索・読取期限/端末ID/位置/回数のチェックはいずれも対象外。
+                        if (isPlainQrCode(item)) {
+                            recordQrSpecificSuccess(item._debugInput, 0);
+                            recordQrCorners(0, resultPts);
+                            firstQR = { text: resultData, points: resultPts, center: computeCenterFromPoints(resultPts) };
+                            secondQR = null;
+                            showPlainQrResult(resultData);
+                            return;
+                        }
+
                         recordQrSpecificSuccess(item._debugInput, qrNo);
                         recordQrCorners(qrNo, resultPts);
                         recordQrMeta(qrNo, item, scanMode); // ★ P3: QR種類/version/mask/EC/配置パターンを記録
@@ -9647,7 +9812,7 @@
                                         const locMatch = await checkLocation(firstQR.locationLatExt24, firstQR.locationLonExt24);
                                         if (!locMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取位置が一致しません");
+                                            showResultScreen(null, locationFailMessage());
                                             return;
                                         }
                                     }
@@ -9733,7 +9898,7 @@
                                 const locMatch = await checkLocation(firstQR.locationLatExt24, firstQR.locationLonExt24);
                                 if (!locMatch) {
                                     isScanning = false; isProcessing = false;
-                                    showResultScreen(null, "読取位置が一致しません");
+                                    showResultScreen(null, locationFailMessage());
                                     return;
                                 }
                             }
@@ -9925,7 +10090,7 @@
                                         const locMatch = await checkLocation(firstQR.locationLatExt24, firstQR.locationLonExt24);
                                         if (!locMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取位置が一致しません");
+                                            showResultScreen(null, locationFailMessage());
                                             return;
                                         }
                                     }
