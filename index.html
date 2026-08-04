@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader5</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -516,6 +516,29 @@
             return locationFailMessage();
         }
 
+        // 市町村コードの照合にも現在位置が必要。GPSが使えないだけの場合に
+        // 「市町村コードが一致しません」と出すと原因が分からないため出し分ける。
+        async function resolveMunicipalityFailMessage() {
+            // 測位できているなら、本当に管轄外
+            if (getFreshDevicePosition()) return '市町村コードが一致しません';
+            if (!isGpsUnavailableReason(lastLocationFailReason)) {
+                if (!navigator.geolocation) {
+                    lastLocationFailReason = 'unsupported';
+                } else {
+                    await new Promise(function(resolve) {
+                        navigator.geolocation.getCurrentPosition(
+                            function(pos) { updateCurrentDevicePosition(pos); resolve(); },
+                            function(err) { noteGeolocationError(err); resolve(); },
+                            { enableHighAccuracy: false, timeout: 5000, maximumAge: 0 }
+                        );
+                    });
+                }
+            }
+            if (isGpsUnavailableReason(lastLocationFailReason)) return 'GPSをONにしてください';
+            if (getFreshDevicePosition()) return '市町村コードが一致しません';
+            return '現在位置を取得中です。しばらくしてからもう一度お試しください';
+        }
+
         function noteGeolocationError(err) {
             if (err && err.code === 1) lastLocationFailReason = 'denied';
             else if (err && err.code === 3) lastLocationFailReason = 'timeout';
@@ -699,7 +722,9 @@
                         updateCurrentDevicePosition(pos);
                         resolve(currentDevicePosition);
                     },
-                    function() { resolve(null); },
+                    // ★ 失敗理由を記録する。これが無いと市町村コード照合の失敗が
+                    //   「GPS未取得」なのか「本当に管轄外」なのか区別できない。
+                    function(err) { noteGeolocationError(err); resolve(null); },
                     { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
                 );
             });
@@ -8755,7 +8780,7 @@
                                         const muniMatch = await checkMunicipality(q1Found.municipalityExt24);
                                         if (!muniMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません", q1Found);
+                                            showResultScreen(null, await resolveMunicipalityFailMessage(), q1Found);
                                             return;
                                         }
                                     }
@@ -8904,7 +8929,7 @@
                         }
                         if (colorScanResult._municipalityFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, "市町村コードが一致しません", colorScanResult._q1ForDisplay);
+                            showResultScreen(null, await resolveMunicipalityFailMessage(), colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._readCountFailed) {
@@ -9907,7 +9932,7 @@
                                         const muniMatch = await checkMunicipality(firstQR.municipalityExt24);
                                         if (!muniMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません");
+                                            showResultScreen(null, await resolveMunicipalityFailMessage());
                                             return;
                                         }
                                     }
@@ -9993,7 +10018,7 @@
                                 const muniMatch = await checkMunicipality(firstQR.municipalityExt24);
                                 if (!muniMatch) {
                                     isScanning = false; isProcessing = false;
-                                    showResultScreen(null, "市町村コードが一致しません");
+                                    showResultScreen(null, await resolveMunicipalityFailMessage());
                                     return;
                                 }
                             }
@@ -10185,7 +10210,7 @@
                                         const muniMatch = await checkMunicipality(firstQR.municipalityExt24);
                                         if (!muniMatch) {
                                             isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません");
+                                            showResultScreen(null, await resolveMunicipalityFailMessage());
                                             return;
                                         }
                                     }
