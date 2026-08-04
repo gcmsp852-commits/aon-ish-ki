@@ -465,10 +465,31 @@
         //    'acquiring'   = エラーは出ていないが、まだ測位できていない（GPS ONでも数秒かかる）
         let lastLocationFailReason = null;
 
+        // ★ 測位値の有効期間。設定で位置情報をOFFにしても watchPosition は
+        //   エラーを出さずに黙って更新を止めることがあるため、古い測位値は無効として扱う。
+        //   （これが無いと、OFFにする前の座標で照合して「読取位置が一致しません」になる）
+        const DEVICE_POSITION_MAX_AGE_MS = 15000;
+        let currentDevicePositionAt = 0;
+
+        function invalidateDevicePosition() {
+            currentDevicePosition = null;
+            currentDevicePositionAt = 0;
+            currentMunicipalityInfo = null;
+            currentMunicipalityPromise = null;
+        }
+
+        function getFreshDevicePosition() {
+            if (!currentDevicePosition) return null;
+            if (Date.now() - currentDevicePositionAt > DEVICE_POSITION_MAX_AGE_MS) return null;
+            return currentDevicePosition;
+        }
+
         function noteGeolocationError(err) {
             if (err && err.code === 1) lastLocationFailReason = 'denied';
             else if (err && err.code === 3) lastLocationFailReason = 'timeout';
             else lastLocationFailReason = 'off';
+            // 取得できなくなった以上、保持している座標は信用できない
+            invalidateDevicePosition();
         }
 
         function locationFailMessage() {
@@ -494,12 +515,19 @@
                 currentMunicipalityPromise = null;
             }
             currentDevicePosition = nextPosition;
+            currentDevicePositionAt = Date.now();
             primeMunicipalityInfo();
         }
 
         function startWatchingPosition() {
             if (!navigator.geolocation) return;
-            if (watchPositionId !== null) return;
+            if (watchPositionId !== null) {
+                // 監視中でも鮮度切れなら張り直す。設定で位置情報をOFFにされた場合、
+                // 既存の watch は更新もエラーも返さないままになることがあるため。
+                if (getFreshDevicePosition()) return;
+                try { navigator.geolocation.clearWatch(watchPositionId); } catch (e) { /* ignore */ }
+                watchPositionId = null;
+            }
             watchPositionId = navigator.geolocation.watchPosition(
                 function(pos) {
                     lastLocationFailReason = null;
@@ -518,13 +546,15 @@
             const qrLat = (latExt24 / 10000) - 90;
             const qrLon = (lonExt24 / 10000) - 180;
 
-            if (!currentDevicePosition) {
+            // ★ 保持中の座標が古い場合は使わず取り直す（位置情報OFF後の古い座標で照合しないため）
+            const known = getFreshDevicePosition();
+            if (!known) {
                 // GPS未取得の場合、同期的に取得を試みる
                 return new Promise(function(resolve) {
                     if (!navigator.geolocation) { lastLocationFailReason = 'unsupported'; resolve(false); return; }
                     navigator.geolocation.getCurrentPosition(
                         function(pos) {
-                            currentDevicePosition = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                            updateCurrentDevicePosition(pos);
                             const ok = matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon);
                             lastLocationFailReason = ok ? null : 'mismatch';
                             resolve(ok);
@@ -534,7 +564,7 @@
                     );
                 });
             }
-            const ok = matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon);
+            const ok = matchLocation(qrLat, qrLon, known.lat, known.lon);
             lastLocationFailReason = ok ? null : 'mismatch';
             return Promise.resolve(ok);
         }
@@ -628,7 +658,8 @@
         }
 
         function getCurrentPositionFast() {
-            if (currentDevicePosition) return Promise.resolve(currentDevicePosition);
+            const fresh = getFreshDevicePosition();
+            if (fresh) return Promise.resolve(fresh);
             return new Promise(function(resolve) {
                 if (!navigator.geolocation) { resolve(null); return; }
                 navigator.geolocation.getCurrentPosition(
@@ -5896,8 +5927,10 @@
                     }
                 }
                 if (qr.locationLatExt24 !== undefined && qr.locationLonExt24 !== undefined) {
-                    if (!currentDevicePosition) {
-                        // まだ測位できていない。watchPosition がエラーを記録済みならその理由を優先する。
+                    const devPos = getFreshDevicePosition();
+                    if (!devPos) {
+                        // まだ測位できていない、または測位値が古い。
+                        // watchPosition がエラーを記録済みならその理由を優先する。
                         if (!lastLocationFailReason) lastLocationFailReason = 'acquiring';
                         target._locationFailed = true;
                         return;
@@ -5905,8 +5938,8 @@
                     if (!matchLocation(
                         (qr.locationLatExt24 / 10000) - 90,
                         (qr.locationLonExt24 / 10000) - 180,
-                        currentDevicePosition.lat,
-                        currentDevicePosition.lon
+                        devPos.lat,
+                        devPos.lon
                     )) {
                         lastLocationFailReason = 'mismatch';
                         target._locationFailed = true;
@@ -5915,7 +5948,7 @@
                 }
                 // 市町村コードチェック（カラーモード用・同期的）
                 if (qr.municipalityExt24 !== undefined) {
-                    if (!currentDevicePosition) {
+                    if (!getFreshDevicePosition()) {
                         target._municipalityFailed = true;
                         return;
                     }
