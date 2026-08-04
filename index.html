@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader6</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2749,7 +2749,7 @@
                 let v;
                 try { v = mk(); } catch (e) { continue; }
                 const opts = Object.assign({}, baseOpts, { inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre });
-                if (wantQrNo === 0 || wantQrNo === 1) opts.acceptQrNo = wantQrNo;
+                if (wantQrNo === 0 || wantQrNo === 1) opts.acceptDecoded = makeAcceptDecodedForQrNo(wantQrNo);
                 let r = null;
                 try { r = jsQR(v.d, w, h, opts); } catch (e) { continue; }
                 if (r && !Array.isArray(r)) r = [r];
@@ -2762,7 +2762,7 @@
             if (!acc.length) {
                 try {
                     const bothOpts = Object.assign({}, baseOpts, { inversionAttempts: QR_INV_BOTH });
-                    if (wantQrNo === 0 || wantQrNo === 1) bothOpts.acceptQrNo = wantQrNo;
+                    if (wantQrNo === 0 || wantQrNo === 1) bothOpts.acceptDecoded = makeAcceptDecodedForQrNo(wantQrNo);
                     let r = jsQR(rgba, w, h, bothOpts);
                     if (r && !Array.isArray(r)) r = [r];
                     if (r && r.length) acc = acc.concat(r);
@@ -3315,7 +3315,7 @@
                     for (let di = 0; di < optsList.length; di++) {
                         const dopt = optsList[di] || {};
                         const opts = { multi: true, inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre };
-                        opts.acceptQrNo = (target === 'Q1') ? 0 : 1;
+                        opts.acceptDecoded = makeAcceptDecodedForQrNo((target === 'Q1') ? 0 : 1);
                         if (dopt.sysEncDecode) opts.sysEncDecode = dopt.sysEncDecode;
                         if (dopt.appEncMask) opts.appEncMask = dopt.appEncMask;
                         if (dopt.captureAppEncDataBytes) opts.captureAppEncDataBytes = true;
@@ -5574,6 +5574,23 @@
             if (colorCount === 2 && popcount8(colorSpec) !== 4) return true;
             if (colorCount === 3 && colorSpec !== PLAIN_QR_COLOR_SPEC_4REGION) return true;
             return false;
+        }
+
+        // ★ jsQR の受理判定コールバック。
+        //   jsQR 側の acceptsDecoded は acceptDecoded も acceptQrNo も無い場合、
+        //   既定で false（拒否）を返す（jsQR.js の scan 内）。そのため acceptQrNo だけを
+        //   渡していると、通常のQRコードは復号に成功しても qrNo が一致せず捨てられ、
+        //   「decode_success は出るのに jsQR 成功 0 回」という状態になる。
+        //   通常QRは第1QR探索時（wantNo===0）に限って受理する。
+        //   第2QR探索時に受理すると、無関係な通常QRを第2QRと誤認するため。
+        function makeAcceptDecodedForQrNo(wantNo) {
+            return function (res) {
+                if (!res || res.isRaw) return false;
+                if (isPlainQrCode(res)) return wantNo === 0;
+                const m32 = getManagementCode32FromQr(res);
+                if (m32 === null) return wantNo === 0;
+                return ((m32 >>> 30) & 0x3) === wantNo;
+            };
         }
 
         function getQrNumber(qr) {
