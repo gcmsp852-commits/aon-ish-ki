@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader4</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -482,6 +482,38 @@
             if (!currentDevicePosition) return null;
             if (Date.now() - currentDevicePositionAt > DEVICE_POSITION_MAX_AGE_MS) return null;
             return currentDevicePosition;
+        }
+
+        // GPSが使えないことを示す理由か（'mismatch' や 'acquiring' と区別する）
+        function isGpsUnavailableReason(reason) {
+            return reason === 'denied' || reason === 'off'
+                || reason === 'timeout' || reason === 'unsupported';
+        }
+
+        // スキャン開始のたびに前回の判定理由を捨てる。
+        // これが無いと、前回スキャンの 'mismatch' が残ってメッセージを誤らせる。
+        function resetLocationFailReason() {
+            lastLocationFailReason = null;
+        }
+
+        // カラーモードの同期パスは測位を待てないため 'acquiring'（測位中）で止まる。
+        // そのままだとGPSがOFFでも「取得中です」と出てしまうので、メッセージを出す直前に
+        // 一度だけ測位を試み、OFFなのか本当に取得中なのかを確定させる。
+        async function resolveLocationFailMessage() {
+            if (lastLocationFailReason === 'acquiring') {
+                if (!navigator.geolocation) {
+                    lastLocationFailReason = 'unsupported';
+                } else {
+                    await new Promise(function(resolve) {
+                        navigator.geolocation.getCurrentPosition(
+                            function(pos) { updateCurrentDevicePosition(pos); resolve(); },
+                            function(err) { noteGeolocationError(err); resolve(); },
+                            { enableHighAccuracy: false, timeout: 5000, maximumAge: 0 }
+                        );
+                    });
+                }
+            }
+            return locationFailMessage();
         }
 
         function noteGeolocationError(err) {
@@ -1889,6 +1921,18 @@
             }
             const fmtAng = (a) => (a == null || !Number.isFinite(a)) ? '-' : a.toFixed(1) + '° (' + classifyOrientation(a) + ')';
             lines.push('読取向き(手動選択): ' + orientationLabel(stats.readOrientation || 'portrait'));
+            // ★ 位置情報の状態（「読取位置が一致しません」と「GPS未取得」の切り分け用）
+            {
+                const fresh = getFreshDevicePosition();
+                const ageMs = currentDevicePositionAt ? (Date.now() - currentDevicePositionAt) : null;
+                lines.push('位置情報: 判定理由=' + (lastLocationFailReason || '-')
+                    + ' / 保持座標=' + (currentDevicePosition
+                        ? (currentDevicePosition.lat.toFixed(5) + ',' + currentDevicePosition.lon.toFixed(5))
+                        : 'なし')
+                    + ' / 経過=' + (ageMs === null ? '-' : Math.round(ageMs) + 'ms')
+                    + ' / 有効=' + (fresh ? 'はい' : 'いいえ')
+                    + ' / watch=' + (watchPositionId !== null ? '監視中' : '未登録'));
+            }
             lines.push('第1QR傾き角: ' + fmtAng(q1ang));
             lines.push('第2QR傾き角: ' + fmtAng(q2ang));
 
@@ -3950,6 +3994,7 @@
                 scanStage = 1;
                 isScanning = true;
                 resetScanDebugStats();
+                resetLocationFailReason();
                 startWatchingPosition();
 
                 if (scanMode === 'normal') {
@@ -4814,6 +4859,7 @@
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
             resetScanDebugStats();
+            resetLocationFailReason();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -4855,6 +4901,7 @@
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
             resetScanDebugStats();
+            resetLocationFailReason();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -5930,8 +5977,14 @@
                     const devPos = getFreshDevicePosition();
                     if (!devPos) {
                         // まだ測位できていない、または測位値が古い。
-                        // watchPosition がエラーを記録済みならその理由を優先する。
-                        if (!lastLocationFailReason) lastLocationFailReason = 'acquiring';
+                        // GPSのエラーが記録済みならそれを優先し、それ以外（'mismatch' や
+                        // 前回スキャンの残り）は必ず上書きする。
+                        // ★ 以前は if (!lastLocationFailReason) だったため、GPSをONにしていた
+                        //   ときの 'mismatch' が残り続け、OFF後も「読取位置が一致しません」に
+                        //   なっていた。
+                        if (!isGpsUnavailableReason(lastLocationFailReason)) {
+                            lastLocationFailReason = 'acquiring';
+                        }
                         target._locationFailed = true;
                         return;
                     }
@@ -8846,7 +8899,7 @@
                         }
                         if (colorScanResult._locationFailed) {
                             isScanning = false; isProcessing = false;
-                            showResultScreen(null, locationFailMessage(), colorScanResult._q1ForDisplay);
+                            showResultScreen(null, await resolveLocationFailMessage(), colorScanResult._q1ForDisplay);
                             return;
                         }
                         if (colorScanResult._municipalityFailed) {
