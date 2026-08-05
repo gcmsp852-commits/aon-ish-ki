@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader7</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3261,7 +3261,16 @@
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
                 const info = parseStandardMgmt(mc32);
                 const wantQrNo = (target === 'Q1') ? 0 : 1;
-                if (!info || info.qrNo !== wantQrNo) { sawOther = true; return null; }
+                // ★ 通常のQRコードは管理部を持たず、jsQR は終端後の埋め草(0xEC/0x11)を
+                //   管理部として読むため qrNo が 0/1 に一致しない。ここで捨てると
+                //   「decode_success は出るのに成功0回」でタイムアウトする。
+                //   第1QR探索時に限って受理し、結果処理ループの isPlainQrCode() 側で
+                //   即時表示させる。第2QR探索で受理すると無関係な通常QRを第2QRと誤認する。
+                if (isPlainQrCode(res)) {
+                    if (target !== 'Q1') { sawOther = true; return null; }
+                } else if (!info || info.qrNo !== wantQrNo) {
+                    sawOther = true; return null;
+                }
                 if (target === 'Q2') {
                     recordPrelocateReason('成功');
                     getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
