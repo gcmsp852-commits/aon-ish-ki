@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader8</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -9844,6 +9844,87 @@
                                         ]
                                     });
                                 }
+                            }
+                        }
+
+                        // --- [フェーズ 3b / 同一データツイン] RSブロック単位フォールバック ---
+                        // 全画面走査でも1枚も復号できなかったフレームでのみ走る。
+                        // 同一データツイン（sameDataFlag）は2枚が完全に同一シンボルなので、
+                        // 両者の訂正前コード語をRSブロック単位で突き合わせ、ブロックごとに
+                        // 訂正が通った方を採用する。汚れが2枚で別の場所に出ていれば、
+                        // どちらも単独では読めなくても組み合わせで復元できる。
+                        // ※フレーム数の閾値は設けない。追加コストはRS再試行数回分と小さく、
+                        //   条件が揃った最初のフレームから救済を効かせたいため。
+                        if (detectedItems.length === 0 && typeof jsQR.decodeTwinCombined === 'function') {
+                            const twinRawOpts = Object.assign({}, opts, { multi: true, extractRawOnly: true });
+                            recordJsQrInput('フェーズ3b ツイン合成', 'full');
+                            const _t3b = nowPerf();
+                            let twinRawList = jsQR(fullData.data, fullData.width, fullData.height, twinRawOpts);
+                            if (twinRawList && !Array.isArray(twinRawList)) twinRawList = [twinRawList];
+                            const twinRaws = (twinRawList || []).filter(r =>
+                                r && r.isRaw && r.codewords && r.version && r.formatInfo && r.location);
+                            const _stats3b = getScanDebugStats();
+                            _stats3b.twinCombineRawCount = twinRaws.length;
+                            // ★ 反転試行などで同一QRが二重に返ることがある。同じ紙面上の同じQR同士を
+                            //   突き合わせても汚れ位置が同一で意味がないため、空間的に離れた2枚を選ぶ。
+                            const _rawCenter = (r) => {
+                                const L = r.location;
+                                return {
+                                    x: (L.topLeftCorner.x + L.topRightCorner.x + L.bottomRightCorner.x + L.bottomLeftCorner.x) / 4,
+                                    y: (L.topLeftCorner.y + L.topRightCorner.y + L.bottomRightCorner.y + L.bottomLeftCorner.y) / 4
+                                };
+                            };
+                            const _rawSize = (r) => Math.hypot(
+                                r.location.topRightCorner.x - r.location.topLeftCorner.x,
+                                r.location.topRightCorner.y - r.location.topLeftCorner.y);
+                            let _pair = null;
+                            for (let _i3b = 0; _i3b < twinRaws.length && !_pair; _i3b++) {
+                                for (let _j3b = _i3b + 1; _j3b < twinRaws.length; _j3b++) {
+                                    const _ci = _rawCenter(twinRaws[_i3b]);
+                                    const _cj = _rawCenter(twinRaws[_j3b]);
+                                    const _minSep = Math.max(_rawSize(twinRaws[_i3b]), _rawSize(twinRaws[_j3b])) * 0.5;
+                                    if (Math.hypot(_ci.x - _cj.x, _ci.y - _cj.y) > _minSep) {
+                                        _pair = [twinRaws[_i3b], twinRaws[_j3b]];
+                                        break;
+                                    }
+                                }
+                            }
+                            let combined = null;
+                            if (_pair) {
+                                combined = jsQR.decodeTwinCombined(_pair[0], _pair[1], opts);
+                                _stats3b.twinCombineStats = combined ? (combined.twinCombined || null) : null;
+                                _stats3b.twinCombineResult = combined ? 'success' : 'failed';
+                            } else {
+                                _stats3b.twinCombineResult = twinRaws.length >= 2 ? '離れた2枚なし' : 'raw<2';
+                            }
+                            addPhaseElapsed(scanStage, 'フェーズ3b ツイン合成', nowPerf() - _t3b, 'jsqr');
+                            if (combined && combined.data && combined.location) {
+                                detectedItems.push({
+                                    _debugInput: recordJsQrSuccess(),
+                                    patternInfo: buildPatternInfo(combined),
+                                    data: combined.data,
+                                    managementCode: combined.managementCode,
+                                    managementCode32: combined.managementCode32,
+                                    managementFlags16: combined.managementFlags16,
+                                    creationDateTimeExt32: combined.creationDateTimeExt32,
+                                    managementExt32: combined.managementExt32,
+                                    expiryExt32: combined.expiryExt32,
+                                    readerIdExt32: combined.readerIdExt32,
+                                    readLimitBits: combined.readLimitBits,
+                                    qrTwinUniqueId8: combined.qrTwinUniqueId8,
+                                    locationLatExt24: combined.locationLatExt24,
+                                    locationLonExt24: combined.locationLonExt24,
+                                    municipalityExt24: combined.municipalityExt24,
+                                    codewords: combined.codewords,
+                                    dataBytes: combined.dataBytes,
+                                    versionNumber: combined.versionNumber,
+                                    points: [
+                                        combined.location.topLeftCorner,
+                                        combined.location.topRightCorner,
+                                        combined.location.bottomRightCorner,
+                                        combined.location.bottomLeftCorner
+                                    ]
+                                });
                             }
                         }
                     }

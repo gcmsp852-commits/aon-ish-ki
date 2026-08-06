@@ -829,6 +829,12 @@ jsQR.resumeDecode = function (rawData, appMask) {
         return null;
     return decoder_1.resumeDecode(rawData, appMask);
 };
+// ★ 同一データQRツインのRSブロック単位フォールバック復号
+jsQR.decodeTwinCombined = function (rawA, rawB, options) {
+    if (!rawA || !rawB)
+        return null;
+    return decoder_1.decodeTwinCombined(rawA, rawB, options);
+};
 exports.default = jsQR;
 
 
@@ -1750,6 +1756,217 @@ function resumeDecode(rawData, appMask) {
     }
 }
 exports.resumeDecode = resumeDecode;
+// ★ 2つのバイト列の先頭 len バイトのうち、値が異なる個数を数える
+function countByteDiff(a, b, len) {
+    var n = 0;
+    for (var i = 0; i < len; i++) {
+        if (a[i] !== b[i]) {
+            n++;
+        }
+    }
+    return n;
+}
+// ★ 新設：同一データQRツインの「RSブロック単位フォールバック復号」
+// 2枚とも単独ではRS訂正が通らない場合に、両者の訂正前コード語をRSブロック単位で
+// 突き合わせ、ブロックごとに訂正が通った方を採用して1つのデータを組み立てる。
+// 同一データツイン（sameDataFlag）は2枚が完全に同一シンボルであることが前提。
+// rawA / rawB は jsQR(..., { extractRawOnly: true, multi: true }) が返す
+// { isRaw, codewords, version, formatInfo, location } 形式のオブジェクト。
+function decodeTwinCombined(rawA, rawB, options) {
+    try {
+        if (!rawA || !rawB) {
+            return null;
+        }
+        var cwA = rawA.codewords, cwB = rawB.codewords;
+        var versionA = rawA.version, versionB = rawB.version;
+        var fmtA = rawA.formatInfo, fmtB = rawB.formatInfo;
+        if (!cwA || !cwB || !versionA || !versionB || !fmtA || !fmtB) {
+            return null;
+        }
+        // 型番・ECレベルが一致しない2枚は同一データツインではない
+        if (versionA.versionNumber !== versionB.versionNumber) {
+            return null;
+        }
+        var ecLevel = fmtA.errorCorrectionLevel;
+        if (ecLevel !== fmtB.errorCorrectionLevel) {
+            return null;
+        }
+        var blocksA = getDataBlocks(cwA, versionA, ecLevel);
+        var blocksB = getDataBlocks(cwB, versionB, ecLevel);
+        if (!blocksA || !blocksB || blocksA.length !== blocksB.length) {
+            return null;
+        }
+        // ★ A/B間で値が食い違う生コード語の数を数えておく。
+        //   これが 2t 以下なら次段（消失訂正）で確実に救えるため、実測の判断材料になる。
+        var comparedCodewords = Math.min(cwA.length, cwB.length);
+        var mismatchCodewords = 0;
+        for (var ci = 0; ci < comparedCodewords; ci++) {
+            if (cwA[ci] !== cwB[ci]) {
+                mismatchCodewords++;
+            }
+        }
+        var stats = {
+            blockCount: blocksA.length,
+            fromA: 0, fromB: 0,
+            bothOk: 0, agreed: 0, disagreed: 0,
+            onlyA: 0, onlyB: 0, bothFailed: 0,
+            comparedCodewords: comparedCodewords,
+            mismatchCodewords: mismatchCodewords
+        };
+        var totalBytes = blocksA.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
+        var resultBytes = new Uint8ClampedArray(totalBytes);
+        var resultIndex = 0;
+        var correctedBlocksArr = [];
+        for (var bi = 0; bi < blocksA.length; bi++) {
+            var blkA = blocksA[bi];
+            var blkB = blocksB[bi];
+            // 同一シンボル前提なのでブロック構成は一致するはず。違えば突き合わせ不可。
+            if (blkA.numDataCodewords !== blkB.numDataCodewords ||
+                blkA.codewords.length !== blkB.codewords.length) {
+                return null;
+            }
+            var eccCount = blkA.codewords.length - blkA.numDataCodewords;
+            var corrA = reedsolomon_1.decode(blkA.codewords, eccCount);
+            var corrB = reedsolomon_1.decode(blkB.codewords, eccCount);
+            var chosen = null;
+            if (corrA && corrB) {
+                stats.bothOk++;
+                if (countByteDiff(corrA, corrB, blkA.numDataCodewords) === 0) {
+                    // 両者一致 → 誤訂正の可能性は極めて低い
+                    stats.agreed++;
+                    chosen = corrA;
+                    stats.fromA++;
+                }
+                else {
+                    // ★ 両方「成功」したのに結果が食い違う ＝ 少なくとも一方が誤訂正している。
+                    //   RSは訂正能力を超えると失敗せず誤った値を返すことがあるため、
+                    //   訂正したシンボル数が少ない方（＝訂正能力に余裕がある方）を信頼する。
+                    stats.disagreed++;
+                    var nA = countByteDiff(blkA.codewords, corrA, blkA.codewords.length);
+                    var nB = countByteDiff(blkB.codewords, corrB, blkB.codewords.length);
+                    if (nB < nA) {
+                        chosen = corrB;
+                        stats.fromB++;
+                    }
+                    else {
+                        chosen = corrA;
+                        stats.fromA++;
+                    }
+                }
+            }
+            else if (corrA) {
+                stats.onlyA++;
+                chosen = corrA;
+                stats.fromA++;
+            }
+            else if (corrB) {
+                stats.onlyB++;
+                chosen = corrB;
+                stats.fromB++;
+            }
+            else {
+                // 両方失敗したブロックが1つでもあれば組み立て不能
+                stats.bothFailed++;
+                pushDebugProbe(options, "twin_block_failed", {
+                    stage: "twin_combine",
+                    versionNumber: versionA.versionNumber,
+                    ecLevel: ecLevel,
+                    blockIndex: bi,
+                    blockCount: blocksA.length,
+                    eccCodewords: eccCount,
+                    correctableSymbols: Math.floor(eccCount / 2),
+                    comparedCodewords: comparedCodewords,
+                    mismatchCodewords: mismatchCodewords
+                });
+                return null;
+            }
+            correctedBlocksArr.push(chosen);
+            for (var i = 0; i < blkA.numDataCodewords; i++) {
+                resultBytes[resultIndex++] = chosen[i];
+            }
+        }
+        // ★ decodeMatrix と同じ手順で訂正済みブロックを再インタリーブし、
+        //   結果オブジェクトの形（res.codewords）を通常復号時と揃える。
+        var ecInfo = versionA.errorCorrectionLevels[ecLevel];
+        var totalCodewords = 0;
+        ecInfo.ecBlocks.forEach(function (block) {
+            totalCodewords += block.numBlocks * (block.dataCodewordsPerBlock + ecInfo.ecCodewordsPerBlock);
+        });
+        var shortBlockDataSize = ecInfo.ecBlocks[0].dataCodewordsPerBlock;
+        var smallBlockCount = ecInfo.ecBlocks[0].numBlocks;
+        var hasLongBlocks = ecInfo.ecBlocks.length > 1;
+        var numBlocks = correctedBlocksArr.length;
+        var correctedCodewords = new Array(totalCodewords);
+        var wi = 0;
+        var blockPos = [];
+        for (var bp = 0; bp < numBlocks; bp++) {
+            blockPos[bp] = 0;
+        }
+        for (var si = 0; si < shortBlockDataSize; si++) {
+            for (var sb = 0; sb < numBlocks; sb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[sb][blockPos[sb]++];
+            }
+        }
+        if (hasLongBlocks) {
+            for (var lb = smallBlockCount; lb < numBlocks; lb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[lb][blockPos[lb]++];
+            }
+        }
+        while (wi < totalCodewords) {
+            for (var eb = 0; eb < numBlocks; eb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[eb][blockPos[eb]++];
+            }
+        }
+        // ★ ユーザ暗号化は decodeMatrix と同じくRS訂正後のデータ部にだけXORを適用する
+        var appEncMask = options ? options.appEncMask : undefined;
+        var encryptedDataBytes = Array.from(resultBytes);
+        var decodeBytes = resultBytes;
+        if (appEncMask && appEncMask.length > 0) {
+            decodeBytes = new Uint8ClampedArray(totalBytes);
+            for (var di = 0; di < totalBytes; di++) {
+                decodeBytes[di] = resultBytes[di] ^ (appEncMask[di] & 0xFF);
+            }
+        }
+        var res = decodeData_1.decode(decodeBytes, versionA.versionNumber);
+        if (!res) {
+            return null;
+        }
+        res.version = versionA;
+        res.versionNumber = versionA.versionNumber;
+        res.codewords = correctedCodewords;
+        res.dataBytes = Array.from(decodeBytes);
+        // ★ decodeData の戻り値は text / bytes 名義。通常経路（jsQR本体）が行っている
+        //   data / binaryData へのマッピングを、直接呼び出しでも成立するようここで行う。
+        res.data = res.text;
+        res.binaryData = res.bytes;
+        // ★ 読取側の buildPatternInfo が マスク/ECレベル の表示に使う
+        res.formatInfo = fmtA;
+        if (appEncMask && appEncMask.length > 0) {
+            res.appEncDataBytesEncrypted = encryptedDataBytes;
+        }
+        res.location = rawA.location || rawB.location;
+        res.twinCombined = stats;
+        pushDebugProbe(options, "twin_combined_success", {
+            stage: "twin_combine",
+            versionNumber: versionA.versionNumber,
+            ecLevel: ecLevel,
+            blockCount: stats.blockCount,
+            fromA: stats.fromA,
+            fromB: stats.fromB,
+            agreed: stats.agreed,
+            disagreed: stats.disagreed,
+            onlyA: stats.onlyA,
+            onlyB: stats.onlyB,
+            comparedCodewords: comparedCodewords,
+            mismatchCodewords: mismatchCodewords
+        });
+        return res;
+    }
+    catch (e) {
+        return null;
+    }
+}
+exports.decodeTwinCombined = decodeTwinCombined;
 
 
 /***/ }),
