@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader14</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1015,6 +1015,24 @@
         let smallQrCropFrameIdx = 0;
         // ★ P0-1: 重い全画面jsQR(2.7/2.8/3)をフレーム毎に巡回させ、1フレームの処理数を減らす
         let fullScanFrameIdx = 0;
+        // ★ BarcodeDetector 間引き制御
+        //   QRツイン（重なりダイヤ配置）は標準の BarcodeDetector では原理的に検出できない。
+        //   それでも毎フレーム呼ぶと全処理時間の3〜4割を空振りに費やし、処理フレーム数が落ちる。
+        //   連続空振りが続いたら呼び出し間隔を広げ、1件でも検出したら即座に毎フレームへ戻す。
+        //   （通常QRコードも扱うため、無効化ではなく適応的な間引きにしている）
+        let bdZeroStreak = 0;      // 連続で検出0だった回数
+        let bdCallTick = 0;        // 間引き判定用のカウンタ
+        let bdSkippedCount = 0;    // 間引いた回数（デバッグ表示用）
+        function bdShouldRun() {
+            bdCallTick++;
+            if (bdZeroStreak < 8) return true;              // まだ見込みがある間は毎回
+            const interval = bdZeroStreak < 24 ? 4 : 8;     // 空振りが続くほど間隔を広げる
+            return (bdCallTick % interval) === 0;
+        }
+        function bdNoteResult(count) {
+            if (count > 0) bdZeroStreak = 0;                // 1件でも取れたら即復帰
+            else bdZeroStreak++;
+        }
         // ★ P0-3: ネイティブBD不発時の補助検出（回転/二値化canvas）用オフスクリーン
         let _bdAuxCanvas = null, _bdAuxCtx = null;
 
@@ -1477,6 +1495,9 @@
         }
 
         function resetScanDebugStats() {
+            // ★ 新しい試行では BarcodeDetector の間引き状態も初期化し、
+            //   最初のフレームから通常QRを取りこぼさないようにする
+            bdZeroStreak = 0; bdCallTick = 0; bdSkippedCount = 0;
             scanDebugStats = {
                 startedAt: Date.now(),
                 startedPerf: nowPerf(),
@@ -1962,6 +1983,8 @@
             lines.push('第2QR傾き角: ' + fmtAng(q2ang));
 
             lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
+            lines.push('BarcodeDetector間引き: ' + bdSkippedCount + '回スキップ / 連続空振り ' + bdZeroStreak + '回'
+                + (bdSkippedCount > 0 ? '（ツイン形式はBDで検出できないため自動間引き中）' : ''));
             // ★ 同一データツインの合成復元（段階2/3）の状況
             {
                 const tc = stats.twinCombineResult;
@@ -1985,6 +2008,12 @@
                             + ` / 両方失敗=${fd.bothFailed}`);
                         lines.push('  A-B不一致コード語: ' + fd.mismatchCodewords + ' / ' + fd.comparedCodewords
                             + `（この数が消失数。ECCを超えると復元不可）`);
+                        if (fd.failBlockErrA !== undefined && fd.failBlockErrA !== null) {
+                            lines.push('  失敗ブロックの推定誤り数: 第1QR=' + fd.failBlockErrA
+                                + ' / 第2QR=' + fd.failBlockErrB
+                                + ' （訂正上限 ' + fd.failBlockCorrectable + '）'
+                                + ' ※汚損していない側も上限超えなら撮影品質が原因');
+                        }
                     }
                     if (s) {
                         lines.push('  内訳: ブロック' + s.blockCount
@@ -3172,7 +3201,12 @@
             //   注: レポートのBD所要にはCPU処理と重なった区間も含まれ得る（壁時計は短縮）。
             let bdDetectPromise = null;
             if (barcodeDetector && ladderOpts.useBarcodeDetector !== false) {
-                bdDetectPromise = timedDetect('共通F1 BarcodeDetectorクロップ', video).catch(() => null);
+                // ★ 空振りが続いている間は間引く（QRツインはBDでは検出できないため）
+                if (bdShouldRun()) {
+                    bdDetectPromise = timedDetect('共通F1 BarcodeDetectorクロップ', video).catch(() => null);
+                } else {
+                    bdSkippedCount++;
+                }
             }
 
             let sawRaw = false, sawOther = false;
@@ -3464,6 +3498,7 @@
                 try {
                     const barcodes = await bdDetectPromise;
                     recordBarcodeDetections('共通F1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
+                    bdNoteResult(barcodes ? barcodes.length : 0);
                     recordBarcodeBoxes('共通F1 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                     const boxes = [];
                     if (barcodes && barcodes.length) {

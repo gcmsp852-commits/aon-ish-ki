@@ -1912,6 +1912,15 @@ function decodeTwinCombined(rawA, rawB, options) {
                     stats.failBlockIndex = bi;
                     stats.failBlockErasures = erasures.length;
                     stats.failBlockEcc = eccCount;
+                    // ★ このブロックがそれぞれ何個ぐらい誤っているかを推定する。
+                    //   汚損していない側まで訂正上限を超えていれば、原因は撮影品質。
+                    if (reedsolomon_1.diagnose) {
+                        var dgA = reedsolomon_1.diagnose(blkA.codewords, eccCount);
+                        var dgB = reedsolomon_1.diagnose(blkB.codewords, eccCount);
+                        stats.failBlockErrA = dgA ? dgA.errorLocatorDegree : null;
+                        stats.failBlockErrB = dgB ? dgB.errorLocatorDegree : null;
+                        stats.failBlockCorrectable = dgA ? dgA.correctableSymbols : Math.floor(eccCount / 2);
+                    }
                     if (options && typeof options === "object") options.twinDiag = stats;
                     pushDebugProbe(options, "twin_block_failed", {
                         stage: "twin_combine",
