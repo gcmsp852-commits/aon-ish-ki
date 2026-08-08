@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader12</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1966,7 +1966,7 @@
             {
                 const tc = stats.twinCombineResult;
                 if (tc === undefined || tc === null) {
-                    lines.push('ツイン合成(段階2/3): 未実行（RS失敗QRが見えなかったか、フォールバック条件を満たさず）');
+                    lines.push('ツイン合成(段階2/3): 未実行 / 起動条件: ' + (stats.twinCombineGate || '記録なし'));
                 } else {
                     const s = stats.twinCombineStats;
                     lines.push('ツイン合成(段階2/3): ' + tc
@@ -3163,6 +3163,8 @@
             }
 
             let sawRaw = false, sawOther = false;
+            // ★ 位置特定は成功したがRS訂正に失敗したフレームか（ツイン合成の起動条件）
+            let sawRsFail = false;
             const debugQ1Rect = (profile && profile.firstQrPoints) ? rectFromPoints(profile.firstQrPoints) : null;
             const debugExpectedQ2Box = (target === 'Q2' && profile && profile.firstQrPoints)
                 ? estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber)
@@ -3374,6 +3376,15 @@
                         }
                         addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tp, 'jsqr');
                         const decLabel = dopt.sysEncDecode ? 'sysenc' : (dopt.appEncMask ? 'appmask' : 'plain');
+                        // ★ 位置特定はできたがRS訂正に失敗した＝ツイン合成で救える可能性がある状態。
+                        //   RS失敗時 jsQR は null を返すため、下の sawRaw は立たない。
+                        //   プローブを直接見て判定する。
+                        if (Array.isArray(opts.probeCollector)) {
+                            for (const p of opts.probeCollector) {
+                                const why = p && (p.reason || p.type || p.stage);
+                                if (why === 'rs_failed' || why === 'reed_solomon') { sawRsFail = true; break; }
+                            }
+                        }
                         recordJsQrProbes(scanStage, phaseLabel, opts.probeCollector, {
                             bin: v.name,
                             scale: String(scaleTag),
@@ -3541,7 +3552,14 @@
             //   段階2: ブロックごとに訂正が通った方を採用
             //   段階3: 両方失敗したブロックは不一致位置を消失として統合訂正
             // により復元を試みる。同一データツインは2枚とも qrNo=0 のため target='Q1' で拾う。
-            if (target === 'Q1' && sawRaw && typeof jsQR.decodeTwinCombined === 'function') {
+            {
+                // 起動条件そのものをログに残す（未実行時に「なぜ動かなかったか」を切り分けるため）
+                const _g = getScanDebugStats();
+                _g.twinCombineGate = `target=${target} / RS失敗検出=${sawRsFail ? 'あり' : 'なし'}`
+                    + ` / isRaw検出=${sawRaw ? 'あり' : 'なし'}`
+                    + ` / 合成関数=${typeof jsQR.decodeTwinCombined === 'function' ? 'あり' : 'なし'}`;
+            }
+            if (target === 'Q1' && (sawRsFail || sawRaw) && typeof jsQR.decodeTwinCombined === 'function') {
                 const _st = getScanDebugStats();
                 try {
                     const TW_PHASE = '共通F5 ツイン合成(段階2/3)';
