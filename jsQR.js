@@ -835,6 +835,12 @@ jsQR.decodeTwinCombined = function (rawA, rawB, options) {
         return null;
     return decoder_1.decodeTwinCombined(rawA, rawB, options);
 };
+// ★ 消失位置を指定できるRS復号（検証・診断用に公開）
+jsQR.decodeWithErasures = function (bytes, twoS, erasurePositions) {
+    if (!bytes)
+        return null;
+    return decoder_1.decodeWithErasures(bytes, twoS, erasurePositions);
+};
 exports.default = jsQR;
 
 
@@ -1756,6 +1762,11 @@ function resumeDecode(rawData, appMask) {
     }
 }
 exports.resumeDecode = resumeDecode;
+// ★ 消失位置を指定できるRS復号の再公開（jsQR本体は reedsolomon を直接importしていないため）
+function decodeWithErasures(bytes, twoS, erasurePositions) {
+    return reedsolomon_1.decodeWithErasures(bytes, twoS, erasurePositions);
+}
+exports.decodeWithErasures = decodeWithErasures;
 // ★ 2つのバイト列の先頭 len バイトのうち、値が異なる個数を数える
 function countByteDiff(a, b, len) {
     var n = 0;
@@ -1807,9 +1818,10 @@ function decodeTwinCombined(rawA, rawB, options) {
         }
         var stats = {
             blockCount: blocksA.length,
-            fromA: 0, fromB: 0,
+            fromA: 0, fromB: 0, fromMerged: 0,
             bothOk: 0, agreed: 0, disagreed: 0,
             onlyA: 0, onlyB: 0, bothFailed: 0,
+            mergedOk: 0, erasuresUsed: 0, maxErasuresInBlock: 0,
             comparedCodewords: comparedCodewords,
             mismatchCodewords: mismatchCodewords
         };
@@ -1865,20 +1877,49 @@ function decodeTwinCombined(rawA, rawB, options) {
                 stats.fromB++;
             }
             else {
-                // 両方失敗したブロックが1つでもあれば組み立て不能
-                stats.bothFailed++;
-                pushDebugProbe(options, "twin_block_failed", {
-                    stage: "twin_combine",
-                    versionNumber: versionA.versionNumber,
-                    ecLevel: ecLevel,
-                    blockIndex: bi,
-                    blockCount: blocksA.length,
-                    eccCodewords: eccCount,
-                    correctableSymbols: Math.floor(eccCount / 2),
-                    comparedCodewords: comparedCodewords,
-                    mismatchCodewords: mismatchCodewords
-                });
-                return null;
+                // ★ 段階3：A・Bとも単独では訂正できないブロック。
+                //   値が一致するコード語は正しいものとして採用し、食い違うコード語は
+                //   「位置は分かるが値が不明」＝消失としてマークして統合訂正にかける。
+                //   消失は未知の誤りの半分のコストで済むため、
+                //   単独（誤り ≤ ⌊e/2⌋）では手が出なかった汚損量でも復元できる。
+                var mergedBlock = new Uint8ClampedArray(blkA.codewords.length);
+                var erasures = [];
+                for (var ei = 0; ei < blkA.codewords.length; ei++) {
+                    if (blkA.codewords[ei] === blkB.codewords[ei]) {
+                        mergedBlock[ei] = blkA.codewords[ei];
+                    }
+                    else {
+                        mergedBlock[ei] = 0;
+                        erasures.push(ei);
+                    }
+                }
+                var corrMerged = reedsolomon_1.decodeWithErasures(mergedBlock, eccCount, erasures);
+                if (corrMerged) {
+                    stats.fromMerged++;
+                    stats.mergedOk++;
+                    stats.erasuresUsed += erasures.length;
+                    if (erasures.length > stats.maxErasuresInBlock) {
+                        stats.maxErasuresInBlock = erasures.length;
+                    }
+                    chosen = corrMerged;
+                }
+                else {
+                    // 統合訂正でも復元できなければ、このブロックは組み立て不能
+                    stats.bothFailed++;
+                    pushDebugProbe(options, "twin_block_failed", {
+                        stage: "twin_combine",
+                        versionNumber: versionA.versionNumber,
+                        ecLevel: ecLevel,
+                        blockIndex: bi,
+                        blockCount: blocksA.length,
+                        eccCodewords: eccCount,
+                        correctableSymbols: Math.floor(eccCount / 2),
+                        blockErasures: erasures.length,
+                        comparedCodewords: comparedCodewords,
+                        mismatchCodewords: mismatchCodewords
+                    });
+                    return null;
+                }
             }
             correctedBlocksArr.push(chosen);
             for (var i = 0; i < blkA.numDataCodewords; i++) {
@@ -1953,10 +1994,13 @@ function decodeTwinCombined(rawA, rawB, options) {
             blockCount: stats.blockCount,
             fromA: stats.fromA,
             fromB: stats.fromB,
+            fromMerged: stats.fromMerged,
             agreed: stats.agreed,
             disagreed: stats.disagreed,
             onlyA: stats.onlyA,
             onlyB: stats.onlyB,
+            erasuresUsed: stats.erasuresUsed,
+            maxErasuresInBlock: stats.maxErasuresInBlock,
             comparedCodewords: comparedCodewords,
             mismatchCodewords: mismatchCodewords
         });
@@ -9475,6 +9519,109 @@ function decode(bytes, twoS) {
     return outputBytes;
 }
 exports.decode = decode;
+// ★ 新設：多項式を x^degreeLimit で打ち切る（mod x^degreeLimit）
+function truncatePoly(field, poly, degreeLimit) {
+    var coeffs = new Uint8ClampedArray(degreeLimit);
+    var maxDegree = poly.degree();
+    for (var d = 0; d < degreeLimit; d++) {
+        coeffs[degreeLimit - 1 - d] = (d <= maxDegree) ? poly.getCoefficient(d) : 0;
+    }
+    return new GenericGFPoly_1.default(field, coeffs);
+}
+// ★ 新設：消失（erasure）位置を指定できるRS復号
+// erasurePositions は bytes 配列上のインデックス（0始まり）。
+// 位置が既知の消失は未知の誤りの半分のコストで済むため、
+//     2 × (未知の誤り数) + (消失数) ≤ twoS
+// を満たす限り復元できる。誤りだけの場合の訂正数 ⌊twoS/2⌋ に対し、
+// 位置がすべて既知なら twoS 個まで訂正できる（＝2倍）。
+function decodeWithErasures(bytes, twoS, erasurePositions) {
+    // 位置の正規化（範囲外・重複を除去）
+    var positions = [];
+    var seen = {};
+    var src = erasurePositions || [];
+    for (var pi = 0; pi < src.length; pi++) {
+        var p = src[pi] | 0;
+        if (p < 0 || p >= bytes.length || seen[p]) {
+            continue;
+        }
+        seen[p] = true;
+        positions.push(p);
+    }
+    if (positions.length === 0) {
+        return decode(bytes, twoS); // 消失がなければ通常の復号と同じ
+    }
+    if (positions.length > twoS) {
+        return null; // 消失だけで訂正能力を超えている
+    }
+    var outputBytes = new Uint8ClampedArray(bytes.length);
+    outputBytes.set(bytes);
+    // 消失位置は値が信用できないので0に潰す（値は未知、位置だけを情報として使う）
+    for (var zi = 0; zi < positions.length; zi++) {
+        outputBytes[positions[zi]] = 0;
+    }
+    var field = new GenericGF_1.default(0x011D, 256, 0);
+    var poly = new GenericGFPoly_1.default(field, outputBytes);
+    var syndromeCoefficients = new Uint8ClampedArray(twoS);
+    var error = false;
+    for (var s = 0; s < twoS; s++) {
+        var evaluation = poly.evaluateAt(field.exp(s + field.generatorBase));
+        syndromeCoefficients[syndromeCoefficients.length - 1 - s] = evaluation;
+        if (evaluation !== 0) {
+            error = true;
+        }
+    }
+    if (!error) {
+        return outputBytes; // 消失位置が0で正しかった（＝既に符号語）
+    }
+    var syndrome = new GenericGFPoly_1.default(field, syndromeCoefficients);
+    // 消失位置多項式 Λ0(x) = Π (1 - Xj x)
+    // Xj = α^(len-1-pos)。既存の decode / findErrorLocations の位置規約に合わせる。
+    var lambda0 = field.one;
+    for (var li = 0; li < positions.length; li++) {
+        var X = field.exp(bytes.length - 1 - positions[li]);
+        // 1 + X·x の係数配列（index0 が最高次）
+        var factor = new GenericGFPoly_1.default(field, Uint8ClampedArray.from([X, 1]));
+        lambda0 = lambda0.multiplyPoly(factor);
+    }
+    // 修正シンドローム T(x) = Λ0(x)·S(x) mod x^twoS
+    var modifiedSyndrome = truncatePoly(field, lambda0.multiplyPoly(syndrome), twoS);
+    if (modifiedSyndrome.isZero()) {
+        // 誤りが消失位置のみに存在する場合。Λ1 = 1, Ω = T = 0 となり訂正量が0になるので、
+        // ここで打ち切って失敗扱いにする（後段の検証でも弾かれる）。
+        return null;
+    }
+    // ユークリッド互除法。停止条件を deg(r) < (twoS + 消失数)/2 にするため R = twoS + 消失数。
+    var sigmaOmega = runEuclideanAlgorithm(field, field.buildMonomial(twoS, 1), modifiedSyndrome, twoS + positions.length);
+    if (sigmaOmega === null) {
+        return null;
+    }
+    var lambda1 = sigmaOmega[0];
+    var omega = sigmaOmega[1];
+    // 全体の誤り位置多項式 Λ(x) = Λ0(x)·Λ1(x)（消失位置＋未知の誤り位置）
+    var lambda = lambda0.multiplyPoly(lambda1);
+    var allLocations = findErrorLocations(field, lambda);
+    if (allLocations == null) {
+        return null;
+    }
+    var magnitudes = findErrorMagnitudes(field, omega, allLocations);
+    for (var mi = 0; mi < allLocations.length; mi++) {
+        var position = outputBytes.length - 1 - field.log(allLocations[mi]);
+        if (position < 0) {
+            return null;
+        }
+        outputBytes[position] = GenericGF_1.addOrSubtractGF(outputBytes[position], magnitudes[mi]);
+    }
+    // ★ 訂正結果の検証：シンドロームが全て0でなければ復元失敗とみなす。
+    //   消失を使うと訂正量が増えるぶん、破綻した解を返さないための保険。
+    var verifyPoly = new GenericGFPoly_1.default(field, outputBytes);
+    for (var vs = 0; vs < twoS; vs++) {
+        if (verifyPoly.evaluateAt(field.exp(vs + field.generatorBase)) !== 0) {
+            return null;
+        }
+    }
+    return outputBytes;
+}
+exports.decodeWithErasures = decodeWithErasures;
 function diagnose(bytes, twoS) {
     var outputBytes = new Uint8ClampedArray(bytes.length);
     outputBytes.set(bytes);
