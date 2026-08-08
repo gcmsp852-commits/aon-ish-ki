@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader13</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1975,6 +1975,17 @@
                         + ` / 試行ペア ${stats.twinCombineTried ?? '-'}組`);
                     if (stats.twinCombineCenters) lines.push('  代表検出: ' + stats.twinCombineCenters);
                     if (stats.twinCombineRawCenters) lines.push('  RAW全件: ' + stats.twinCombineRawCenters);
+                    const fd = stats.twinCombineFailDiag;
+                    if (fd) {
+                        lines.push('  失敗内訳: ' + (fd.failReason || '理由不明'));
+                        lines.push('  ブロック' + fd.blockCount
+                            + ` / 両方成功=${fd.bothOk}(一致${fd.agreed}/不一致${fd.disagreed})`
+                            + ` / 片方のみ成功=A${fd.onlyA},B${fd.onlyB}`
+                            + ` / 統合訂正成功=${fd.mergedOk}`
+                            + ` / 両方失敗=${fd.bothFailed}`);
+                        lines.push('  A-B不一致コード語: ' + fd.mismatchCodewords + ' / ' + fd.comparedCodewords
+                            + `（この数が消失数。ECCを超えると復元不可）`);
+                    }
                     if (s) {
                         lines.push('  内訳: ブロック' + s.blockCount
                             + ` / 段階2(onlyA=${s.onlyA}, onlyB=${s.onlyB})`
@@ -3619,8 +3630,11 @@
                             if (A.version.versionNumber !== B.version.versionNumber) continue;
                             if (A.formatInfo.errorCorrectionLevel !== B.formatInfo.errorCorrectionLevel) continue;
                             _tried++;
-                            _comb = jsQR.decodeTwinCombined(A, B, {});
+                            // 失敗時の内訳を受け取るための器（decodeTwinCombined が twinDiag に書き込む）
+                            const _dg = {};
+                            _comb = jsQR.decodeTwinCombined(A, B, _dg);
                             if (_comb) break;
+                            if (_dg.twinDiag) _st.twinCombineFailDiag = _dg.twinDiag;
                         }
                     }
                     _st.twinCombineTried = _tried;

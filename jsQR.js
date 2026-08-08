@@ -1906,6 +1906,13 @@ function decodeTwinCombined(rawA, rawB, options) {
                 else {
                     // 統合訂正でも復元できなければ、このブロックは組み立て不能
                     stats.bothFailed++;
+                    // ★ 失敗理由を呼び出し側へ返す（null を返すため戻り値では伝えられない）
+                    stats.failReason = "ブロック" + bi + "が復元不可: 消失" + erasures.length
+                        + " / ECC" + eccCount + " (消失は最大" + eccCount + "まで訂正可)";
+                    stats.failBlockIndex = bi;
+                    stats.failBlockErasures = erasures.length;
+                    stats.failBlockEcc = eccCount;
+                    if (options && typeof options === "object") options.twinDiag = stats;
                     pushDebugProbe(options, "twin_block_failed", {
                         stage: "twin_combine",
                         versionNumber: versionA.versionNumber,
@@ -1970,6 +1977,9 @@ function decodeTwinCombined(rawA, rawB, options) {
         }
         var res = decodeData_1.decode(decodeBytes, versionA.versionNumber);
         if (!res) {
+            // 全ブロックの訂正は通ったが、組み立てたバイト列が復号できなかった
+            stats.failReason = "全ブロック訂正成功だがデータ復号に失敗（誤訂正の疑い）";
+            if (options && typeof options === "object") options.twinDiag = stats;
             return null;
         }
         res.version = versionA;
