@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader10</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1962,6 +1962,25 @@
             lines.push('第2QR傾き角: ' + fmtAng(q2ang));
 
             lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
+            // ★ 同一データツインの合成復元（段階2/3）の状況
+            {
+                const tc = stats.twinCombineResult;
+                if (tc === undefined || tc === null) {
+                    lines.push('ツイン合成(段階2/3): 未実行（RS失敗QRが見えなかったか、フォールバック条件を満たさず）');
+                } else {
+                    const s = stats.twinCombineStats;
+                    lines.push('ツイン合成(段階2/3): ' + tc
+                        + ` / RAW取得 ${stats.twinCombineRawCount ?? '-'}件`
+                        + ` / 重複除去後 ${stats.twinCombineDistinct ?? '-'}件`
+                        + ` / 試行ペア ${stats.twinCombineTried ?? '-'}組`);
+                    if (s) {
+                        lines.push('  内訳: ブロック' + s.blockCount
+                            + ` / 段階2(onlyA=${s.onlyA}, onlyB=${s.onlyB})`
+                            + ` / 段階3(fromMerged=${s.fromMerged}, 消失最大=${s.maxErasuresInBlock})`
+                            + ` / 両方失敗=${s.bothFailed} / A-B不一致コード語=${s.mismatchCodewords}`);
+                    }
+                }
+            }
             lines.push('即時プリロケート: ' + `試行 ${stats.immediatePrelocate.attempted}回 / 成功 ${stats.immediatePrelocate.success}回` + (stats.immediatePrelocate.last ? ` / 最後=${stats.immediatePrelocate.last.success ? '成功' : '失敗'} ${stats.immediatePrelocate.last.detail || ''}` : '') + (stats.immediatePrelocate.lastReason ? ` / 理由=${stats.immediatePrelocate.lastReason}` : ''));
             lines.push('プリロケート当たり変種: ' + (stats.prelocateWin || '-'));
 
@@ -3512,6 +3531,105 @@
                     }, maxDim, 90, fullPhaseLabel, 'full',
                     { cropRect: { sx: 0, sy: 0, sw: vw, sh: vh } });
                     if (hitR) return hitR;
+                }
+            }
+
+            // --- [共通F5 / 同一データツイン] RSブロック単位＋消失訂正のフォールバック ---
+            // ここまでの全変種で復号できず、かつ「位置は取れたがRS訂正に失敗した」QRが
+            // 見えている場合(sawRaw)のみ走る。同一データツインは2枚が完全に同一シンボルなので、
+            // 訂正前コード語をRSブロック単位で突き合わせ、
+            //   段階2: ブロックごとに訂正が通った方を採用
+            //   段階3: 両方失敗したブロックは不一致位置を消失として統合訂正
+            // により復元を試みる。同一データツインは2枚とも qrNo=0 のため target='Q1' で拾う。
+            if (target === 'Q1' && sawRaw && typeof jsQR.decodeTwinCombined === 'function') {
+                const _st = getScanDebugStats();
+                try {
+                    const TW_PHASE = '共通F5 ツイン合成(段階2/3)';
+                    const _tscale = Math.min(1, 960 / Math.max(vw, vh));
+                    const _tw = Math.max(1, Math.round(vw * _tscale));
+                    const _th = Math.max(1, Math.round(vh * _tscale));
+                    zxingCanvas.width = _tw; zxingCanvas.height = _th;
+                    zxingCtx.drawImage(video, 0, 0, _tw, _th);
+                    const _tdata = zxingCtx.getImageData(0, 0, _tw, _th);
+                    const _tinv = 1 / _tscale;
+                    recordJsQrInput(TW_PHASE, 'full');
+                    const _tt = nowPerf();
+                    let _rawList = jsQR(_tdata.data, _tw, _th, {
+                        inversionAttempts: (typeof QR_INV_BOTH !== 'undefined' ? QR_INV_BOTH : 'attemptBoth'),
+                        multi: true, extractRawOnly: true
+                    });
+                    if (_rawList && !Array.isArray(_rawList)) _rawList = [_rawList];
+                    const _raws = (_rawList || []).filter(r =>
+                        r && r.isRaw && r.codewords && r.version && r.formatInfo && r.location);
+                    _st.twinCombineRawCount = _raws.length;
+                    // 反転試行などで同一QRが重複して返るため、位置で代表1件にまとめる
+                    const _ctr = r => { const L = r.location; return {
+                        x: (L.topLeftCorner.x + L.topRightCorner.x + L.bottomRightCorner.x + L.bottomLeftCorner.x) / 4,
+                        y: (L.topLeftCorner.y + L.topRightCorner.y + L.bottomRightCorner.y + L.bottomLeftCorner.y) / 4 }; };
+                    const _rsz = r => Math.hypot(
+                        r.location.topRightCorner.x - r.location.topLeftCorner.x,
+                        r.location.topRightCorner.y - r.location.topLeftCorner.y);
+                    const _dist = [];
+                    for (const r of _raws) {
+                        const c = _ctr(r), s = _rsz(r);
+                        if (!_dist.some(d => Math.hypot(d.c.x - c.x, d.c.y - c.y) <= Math.max(d.s, s) * 0.5)) {
+                            _dist.push({ raw: r, c: c, s: s });
+                        }
+                    }
+                    _st.twinCombineDistinct = _dist.length;
+                    // 誤検出が混ざるので、型番/ECが一致するペアを順に試す
+                    let _comb = null, _tried = 0;
+                    for (let i = 0; i < _dist.length && !_comb && _tried < 8; i++) {
+                        for (let j = i + 1; j < _dist.length && _tried < 8; j++) {
+                            const A = _dist[i].raw, B = _dist[j].raw;
+                            if (A.version.versionNumber !== B.version.versionNumber) continue;
+                            if (A.formatInfo.errorCorrectionLevel !== B.formatInfo.errorCorrectionLevel) continue;
+                            _tried++;
+                            _comb = jsQR.decodeTwinCombined(A, B, {});
+                            if (_comb) break;
+                        }
+                    }
+                    _st.twinCombineTried = _tried;
+                    addPhaseElapsed(scanStage, TW_PHASE, nowPerf() - _tt, 'jsqr');
+                    if (_comb && _comb.data && _comb.location) {
+                        _st.twinCombineResult = 'success';
+                        _st.twinCombineStats = _comb.twinCombined || null;
+                        const L = _comb.location;
+                        const _pts = [
+                            { x: L.topLeftCorner.x * _tinv, y: L.topLeftCorner.y * _tinv },
+                            { x: L.topRightCorner.x * _tinv, y: L.topRightCorner.y * _tinv },
+                            { x: L.bottomRightCorner.x * _tinv, y: L.bottomRightCorner.y * _tinv },
+                            { x: L.bottomLeftCorner.x * _tinv, y: L.bottomLeftCorner.y * _tinv }
+                        ];
+                        return {
+                            _debugInput: recordJsQrSuccess(0),
+                            text: _comb.data,
+                            data: _comb.data,
+                            patternInfo: buildPatternInfo(_comb),
+                            managementCode: _comb.managementCode,
+                            managementCode32: _comb.managementCode32,
+                            managementFlags16: _comb.managementFlags16,
+                            creationDateTimeExt32: _comb.creationDateTimeExt32,
+                            managementExt32: _comb.managementExt32,
+                            expiryExt32: _comb.expiryExt32,
+                            readerIdExt32: _comb.readerIdExt32,
+                            readLimitBits: _comb.readLimitBits,
+                            qrTwinUniqueId8: _comb.qrTwinUniqueId8,
+                            locationLatExt24: _comb.locationLatExt24,
+                            locationLonExt24: _comb.locationLonExt24,
+                            municipalityExt24: _comb.municipalityExt24,
+                            codewords: _comb.codewords,
+                            dataBytes: _comb.dataBytes,
+                            versionNumber: _comb.versionNumber,
+                            location: _comb.location,
+                            points: _pts,
+                            center: computeCenterFromPoints(_pts)
+                        };
+                    }
+                    _st.twinCombineResult = _tried > 0 ? 'failed'
+                        : (_dist.length >= 2 ? '型番/EC一致ペアなし' : ('raw<2(raw=' + _raws.length + ')'));
+                } catch (e) {
+                    _st.twinCombineResult = 'error: ' + ((e && e.message) ? e.message : String(e));
                 }
             }
 
@@ -9877,25 +9995,39 @@
                             const _rawSize = (r) => Math.hypot(
                                 r.location.topRightCorner.x - r.location.topLeftCorner.x,
                                 r.location.topRightCorner.y - r.location.topLeftCorner.y);
-                            let _pair = null;
-                            for (let _i3b = 0; _i3b < twinRaws.length && !_pair; _i3b++) {
-                                for (let _j3b = _i3b + 1; _j3b < twinRaws.length; _j3b++) {
-                                    const _ci = _rawCenter(twinRaws[_i3b]);
-                                    const _cj = _rawCenter(twinRaws[_j3b]);
-                                    const _minSep = Math.max(_rawSize(twinRaws[_i3b]), _rawSize(twinRaws[_j3b])) * 0.5;
-                                    if (Math.hypot(_ci.x - _cj.x, _ci.y - _cj.y) > _minSep) {
-                                        _pair = [twinRaws[_i3b], twinRaws[_j3b]];
-                                        break;
-                                    }
+                            // 同じ位置から返ってきた重複検出は代表1件にまとめる
+                            const _distinct = [];
+                            for (const _r of twinRaws) {
+                                const _c = _rawCenter(_r), _sz = _rawSize(_r);
+                                const _dup = _distinct.some(d =>
+                                    Math.hypot(d.c.x - _c.x, d.c.y - _c.y) <= Math.max(d.sz, _sz) * 0.5);
+                                if (!_dup) _distinct.push({ raw: _r, c: _c, sz: _sz });
+                            }
+                            _stats3b.twinCombineDistinct = _distinct.length;
+                            // ★ 誤検出（型番やECレベルが実物と違うもの）が混ざるため、
+                            //   候補ペアを順に試して最初に成立したものを採る。
+                            //   型番・ECレベルが食い違うペアはRS以前に成立しないので先に捨てる。
+                            let combined = null;
+                            let _tried = 0;
+                            const _MAX_TRY = 8;
+                            for (let _i3b = 0; _i3b < _distinct.length && !combined && _tried < _MAX_TRY; _i3b++) {
+                                for (let _j3b = _i3b + 1; _j3b < _distinct.length && _tried < _MAX_TRY; _j3b++) {
+                                    const _A = _distinct[_i3b].raw, _B = _distinct[_j3b].raw;
+                                    if (_A.version.versionNumber !== _B.version.versionNumber) continue;
+                                    if (_A.formatInfo.errorCorrectionLevel !== _B.formatInfo.errorCorrectionLevel) continue;
+                                    _tried++;
+                                    combined = jsQR.decodeTwinCombined(_A, _B, opts);
+                                    if (combined) break;
                                 }
                             }
-                            let combined = null;
-                            if (_pair) {
-                                combined = jsQR.decodeTwinCombined(_pair[0], _pair[1], opts);
-                                _stats3b.twinCombineStats = combined ? (combined.twinCombined || null) : null;
-                                _stats3b.twinCombineResult = combined ? 'success' : 'failed';
+                            _stats3b.twinCombineTried = _tried;
+                            if (combined) {
+                                _stats3b.twinCombineStats = combined.twinCombined || null;
+                                _stats3b.twinCombineResult = 'success';
                             } else {
-                                _stats3b.twinCombineResult = twinRaws.length >= 2 ? '離れた2枚なし' : 'raw<2';
+                                _stats3b.twinCombineStats = null;
+                                _stats3b.twinCombineResult = _tried > 0 ? 'failed'
+                                    : (_distinct.length >= 2 ? '型番/EC一致ペアなし' : 'raw<2');
                             }
                             addPhaseElapsed(scanStage, 'フェーズ3b ツイン合成', nowPerf() - _t3b, 'jsqr');
                             if (combined && combined.data && combined.location) {
