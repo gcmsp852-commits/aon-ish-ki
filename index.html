@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader12</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1973,6 +1973,8 @@
                         + ` / RAW取得 ${stats.twinCombineRawCount ?? '-'}件`
                         + ` / 重複除去後 ${stats.twinCombineDistinct ?? '-'}件`
                         + ` / 試行ペア ${stats.twinCombineTried ?? '-'}組`);
+                    if (stats.twinCombineCenters) lines.push('  代表検出: ' + stats.twinCombineCenters);
+                    if (stats.twinCombineRawCenters) lines.push('  RAW全件: ' + stats.twinCombineRawCenters);
                     if (s) {
                         lines.push('  内訳: ブロック' + s.blockCount
                             + ` / 段階2(onlyA=${s.onlyA}, onlyB=${s.onlyB})`
@@ -3587,14 +3589,28 @@
                     const _rsz = r => Math.hypot(
                         r.location.topRightCorner.x - r.location.topLeftCorner.x,
                         r.location.topRightCorner.y - r.location.topLeftCorner.y);
+                    // ★ QRツインは2枚が 8.5モジュール しかずれずに大きく重なる形式。
+                    //   「QRサイズの半分」を重複判定に使うと2枚を同一QRとみなして潰してしまう。
+                    //   同一QRの重複検出（反転試行など）は数モジュール以内に収まるので、
+                    //   モジュール寸法を基準に判定する。
+                    const _modPx = r => {
+                        const dim = 17 + 4 * ((r.version && r.version.versionNumber) || 1);
+                        return _rsz(r) / Math.max(1, dim);
+                    };
                     const _dist = [];
                     for (const r of _raws) {
-                        const c = _ctr(r), s = _rsz(r);
-                        if (!_dist.some(d => Math.hypot(d.c.x - c.x, d.c.y - c.y) <= Math.max(d.s, s) * 0.5)) {
-                            _dist.push({ raw: r, c: c, s: s });
+                        const c = _ctr(r);
+                        const lim = Math.max(4, _modPx(r) * 3);
+                        if (!_dist.some(d => Math.hypot(d.c.x - c.x, d.c.y - c.y) <= lim)) {
+                            _dist.push({ raw: r, c: c, s: _rsz(r) });
                         }
                     }
                     _st.twinCombineDistinct = _dist.length;
+                    // 切り分け用に、代表として残った検出位置とサイズを記録する
+                    _st.twinCombineCenters = _dist.map(d =>
+                        `(${Math.round(d.c.x)},${Math.round(d.c.y)})幅${Math.round(d.s)}`).join(' ');
+                    _st.twinCombineRawCenters = _raws.map(r =>
+                        `(${Math.round(_ctr(r).x)},${Math.round(_ctr(r).y)})v${r.version.versionNumber}e${r.formatInfo.errorCorrectionLevel}`).join(' ');
                     // 誤検出が混ざるので、型番/ECが一致するペアを順に試す
                     let _comb = null, _tried = 0;
                     for (let i = 0; i < _dist.length && !_comb && _tried < 8; i++) {
