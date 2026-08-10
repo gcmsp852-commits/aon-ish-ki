@@ -479,19 +479,16 @@ function scan(matrix, options) {
         if (!res) {
             return null;
         }
-        var mc32 = null;
-        if (res.managementCode32 !== undefined && res.managementCode32 !== null) {
-            mc32 = res.managementCode32 >>> 0;
+        // ★Ver3.1：論理QR番号(qrNo)は管理部48ビットの先頭3ビット。
+        //   旧32ビット版の「先頭2ビット」から幅が変わっているので注意。
+        if (typeof res.managementBits48 === "string" && res.managementBits48.length === 48) {
+            return parseInt(res.managementBits48.substr(0, 3), 2);
         }
-        else if (res.managementCode !== undefined && res.managementCode !== null) {
-            var high = res.managementCode & 0xFFFF;
-            var low = res.managementFlags16 !== undefined && res.managementFlags16 !== null ? res.managementFlags16 & 0xFFFF : 0;
-            mc32 = (((high << 16) | low) >>> 0);
+        // managementCode には管理部の上位32ビットが入る（hi16<<16 | mid16）
+        if (res.managementCode !== undefined && res.managementCode !== null) {
+            return ((res.managementCode >>> 0) >>> 29) & 0x7;
         }
-        if (mc32 === null) {
-            return null;
-        }
-        return (mc32 >>> 30) & 0x3;
+        return null;
     };
     var acceptsDecoded = function (res) {
         if (!res || res.isRaw) {
@@ -562,6 +559,9 @@ function scan(matrix, options) {
                     managementCode: decoded.managementCode,
                     managementCode32: decoded.managementCode32,
                     managementFlags16: decoded.managementFlags16,
+                    managementBits48: decoded.managementBits48,
+                    imageIdExt32: decoded.imageIdExt32,
+                    userIdExt32: decoded.userIdExt32,
                     creationDateTimeExt32: decoded.creationDateTimeExt32,
                     managementExt32: decoded.managementExt32,
                     expiryExt32: decoded.expiryExt32,
@@ -789,6 +789,9 @@ function buildDirectDecodeResult(decoded, matrix) {
         managementCode: decoded.managementCode,
         managementCode32: decoded.managementCode32,
         managementFlags16: decoded.managementFlags16,
+        managementBits48: decoded.managementBits48,
+        imageIdExt32: decoded.imageIdExt32,
+        userIdExt32: decoded.userIdExt32,
         creationDateTimeExt32: decoded.creationDateTimeExt32,
         managementExt32: decoded.managementExt32,
         expiryExt32: decoded.expiryExt32,
@@ -2180,53 +2183,65 @@ function decode(data, version) {
         if (mode === ModeByte.Terminator) {
             // ★ ここから書き換え！ ★
             // 管理部16bit + 終端4bit (合計20bit) が残っているか確認
-            if (stream.available() >= 20) {
-                // 管理部16ビットを読み取って result に保存
-                var managementHigh16 = stream.readBits(16);
-                var managementLow16 = stream.available() >= 16 ? stream.readBits(16) : 0;
-                result.managementCode = managementHigh16;
-                result.managementCode32 = (((managementHigh16 & 0xFFFF) << 16) | (managementLow16 & 0xFFFF)) >>> 0;
-                result.managementFlags16 = managementLow16 & 0xFFFF;
-                result.readLimitBits = (result.managementFlags16 >>> 2) & 0x3;
-                var extBlockCount = 0;
-                if ((result.managementFlags16 & 0x0200) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0100) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0080) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0040) !== 0) extBlockCount++;
-                var hasLocation = (result.managementFlags16 & 0x0020) !== 0;
-                var hasMunicipality = (result.managementFlags16 & 0x0010) !== 0;
-                var qrNo = (managementHigh16 >>> 14) & 0x3;
-                var hasReadLimit = result.readLimitBits !== 0 && qrNo === 0;
-                var extBitsNeeded = extBlockCount * 32 + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0) + (hasReadLimit ? 8 : 0) + 4;
-                if ((extBlockCount > 0 || hasLocation || hasMunicipality || hasReadLimit) && stream.available() >= extBitsNeeded) {
-                    if ((result.managementFlags16 & 0x0200) !== 0) {
-                        result.creationDateTimeExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0100) !== 0) {
-                        result.expiryExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0080) !== 0) {
-                        result.readerIdExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0040) !== 0) {
-                        result.managementExt32 = stream.readBits(32);
-                    }
+            // ★Ver3.1：管理部48ビット（16ビット×3）＋拡張管理部
+            //   フィールド定義は qrtwin-mgmt48.js と一致させること。
+            //   拡張管理部は「管理部のビット位置が早い順に固定幅で連結」の規則で並ぶ。
+            if (stream.available() >= 52) {   // 管理部48 + 終端4
+                var pad16 = function (v) { return ("0000000000000000" + (v >>> 0).toString(2)).slice(-16); };
+                var mgHi = stream.readBits(16);
+                var mgMid = stream.available() >= 16 ? stream.readBits(16) : 0;
+                var mgLo = stream.available() >= 16 ? stream.readBits(16) : 0;
+                var B = pad16(mgHi) + pad16(mgMid) + pad16(mgLo);
+                var seg = function (pos, w) { return parseInt(B.substr(pos - 1, w), 2); };
+                result.managementBits48 = B;
+                // ★managementCode に上位32ビット（hi16<<16|mid16）を、
+                //   managementFlags16 に下位16ビットを入れる。
+                //   読取側は既存の (managementCode, managementFlags16) の2引数のまま
+                //   48ビット全体を受け取れるので、呼び出し箇所の改修が不要になる。
+                result.managementCode = (((mgHi & 0xFFFF) << 16) | (mgMid & 0xFFFF)) >>> 0;
+                result.managementHigh16 = mgHi;
+                result.managementMid16 = mgMid;
+                result.managementFlags16 = mgLo & 0xFFFF;
+                // --- 管理部のフィールド展開（位置は仕様書の1始まり表記） ---
+                result.qrNo = seg(1, 3);
+                result.systemStruBits = seg(4, 4);
+                result.colorSpec1 = seg(8, 8);
+                result.colorSpec2 = seg(16, 8);
+                result.dataCompBits = seg(24, 3);
+                result.dataPosition = seg(27, 2);
+                result.webDataKind = seg(29, 3);
+                result.sameDataFlag = seg(32, 1) === 1;
+                result.sysEncFlag = seg(33, 1) === 1;
+                result.appEncFlag = seg(34, 1) === 1;
+                var hasDateTime     = seg(35, 1) === 1;
+                var hasExpiry       = seg(36, 1) === 1;
+                var hasReaderId     = seg(37, 1) === 1;
+                var hasImageId      = seg(38, 1) === 1;
+                var hasLocation     = seg(39, 1) === 1;
+                var hasMunicipality = seg(40, 1) === 1;
+                result.readLimitBits = seg(41, 2);
+                var userIdBit = seg(43, 1) === 1;
+                result.paddingExt = seg(44, 2);
+                // --- 拡張管理部 ---
+                var hasUniqueId = result.readLimitBits !== 0;
+                var extBitsNeeded = (hasDateTime ? 32 : 0) + (hasExpiry ? 32 : 0) + (hasReaderId ? 32 : 0)
+                    + (hasImageId ? 32 : 0) + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0)
+                    + (hasUniqueId ? 8 : 0) + (userIdBit ? 32 : 0);
+                if (extBitsNeeded > 0 && stream.available() >= extBitsNeeded) {
+                    if (hasDateTime) result.creationDateTimeExt32 = stream.readBits(32);
+                    if (hasExpiry) result.expiryExt32 = stream.readBits(32);
+                    if (hasReaderId) result.readerIdExt32 = stream.readBits(32);
+                    if (hasImageId) result.imageIdExt32 = stream.readBits(32);
                     if (hasLocation) {
                         result.locationLatExt24 = stream.readBits(24);
                         result.locationLonExt24 = stream.readBits(24);
                     }
-                    if (hasMunicipality) {
-                        result.municipalityExt24 = stream.readBits(24);
-                    }
-                    if (hasReadLimit) {
-                        result.qrTwinUniqueId8 = stream.readBits(8);
-                    }
-                    // 後ろの終端4ビット(0000)を読み飛ばす
-                    stream.readBits(4);
-                } else {
-                    // 後ろの終端4ビット(0000)を読み飛ばす
-                    stream.readBits(4);
+                    if (hasMunicipality) result.municipalityExt24 = stream.readBits(24);
+                    if (hasUniqueId) result.qrTwinUniqueId8 = stream.readBits(8);
+                    if (userIdBit) result.userIdExt32 = stream.readBits(32);
                 }
+                // 後ろの終端4ビット(0000)を読み飛ばす
+                if (stream.available() >= 4) stream.readBits(4);
             }
             return result;
             // ★ ここまで書き換え！ ★

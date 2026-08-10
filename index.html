@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader16</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -378,6 +378,8 @@
     </div>
 
     <script src="jsQR.js"></script>
+    <!-- ★Ver3.1：管理部48ビットの共通モジュール。生成ソフトと同一の定義を使う -->
+    <script src="qrtwin-mgmt48.js"></script>
 
     <script>
         if ('serviceWorker' in navigator) {
@@ -5718,13 +5720,16 @@
             return Array.from(found.values());
         }
 
+        // ★Ver3.1：管理部48ビットのビット列（48文字の文字列）を返す。
+        //   managementCode に上位32ビット、managementFlags16 に下位16ビットが入る。
+        //   呼び出し箇所（16箇所）を変えずに済むよう、関数名と引数はそのまま据え置き、
+        //   戻り値だけ「32ビット数値」から「48ビット文字列」へ変更している。
         function getManagementCode32FromParts(managementCode, managementFlags16 = null) {
             if (managementCode === undefined || managementCode === null) return null;
-            if ((managementCode >>> 0) > 0xFFFF && (managementFlags16 === undefined || managementFlags16 === null)) {
-                return managementCode >>> 0;
-            }
             if (managementFlags16 === undefined || managementFlags16 === null) return null;
-            return ((((managementCode & 0xFFFF) << 16) | (managementFlags16 & 0xFFFF)) >>> 0);
+            const hi32 = (managementCode >>> 0).toString(2).padStart(32, '0').slice(-32);
+            const lo16 = (managementFlags16 & 0xFFFF).toString(2).padStart(16, '0').slice(-16);
+            return hi32 + lo16;
         }
 
         function getManagementCode32FromQr(qr) {
@@ -8450,29 +8455,61 @@
             return true;
         }
 
+        // ★Ver3.1：管理部48ビットの解析。
+        //   フィールド定義は qrtwin-mgmt48.js に一本化し、ここは呼ぶだけにする。
+        //   戻り値のキー名は既存コードが参照しているため据え置き、
+        //   廃止されたフィールド（colorCountBits / dataTypeBits 等）は互換用に補う。
         function parseStandardMgmt(managementCode, managementFlags16 = null) {
-            const managementCode32 = getManagementCode32FromParts(managementCode, managementFlags16);
-            if (managementCode32 === null) return null;
-            const high = (managementCode32 >>> 16) & 0xFFFF;
-            const low = managementCode32 & 0xFFFF;
+            const M = window.QRTwinMgmt48;
+            if (!M) return null;
+            let bits = null;
+            if (typeof managementCode === 'string' && /^[01]{48}$/.test(managementCode)) {
+                bits = managementCode;
+            } else {
+                const v = getManagementCode32FromParts(managementCode, managementFlags16);
+                if (typeof v === 'string' && v.length === 48) bits = v;
+            }
+            if (!bits) return null;
+            const p = M.parseMgmt48(bits);
+            if (!p) return null;
+            const st = M.deriveStructure(p.systemStruBitsBits);
+            // 旧 colorCountBits 互換：最大色数から導出（4色→2 / 8色→3 / 白黒→0）
+            let colorCountBits = 0;
+            if (st) {
+                const maxColors = Math.max.apply(null, st.colors);
+                colorCountBits = (maxColors === 8) ? 3 : (maxColors === 4 ? 2 : 0);
+            }
             return {
-                qrNo: (high >>> 14) & 0x3,
-                colorCountBits: (high >>> 12) & 0x3,
-                colorSpecBits: (high >>> 4) & 0xFF,
-                dataCompBits: (high >>> 2) & 0x3,
-                regionIndexBits: high & 0x3,
-                sameDataFlag: ((low >>> 15) & 1) === 1,
-                encryptionBits: (low >>> 13) & 0x3,
-                sysEncFlag: ((low >>> 14) & 1) === 1,
-                appEncFlag: ((low >>> 13) & 1) === 1,
-                dataTypeBits: (low >>> 10) & 0x7,
-                hasDateTime: (low & 0x0200) !== 0,
-                hasExpiry: (low & 0x0100) !== 0,
-                hasReaderId: (low & 0x0080) !== 0,
-                hasImageId: (low & 0x0040) !== 0,
-                hasLocation: (low & 0x0020) !== 0,
-                hasMunicipality: (low & 0x0010) !== 0,
-                readLimitBits: (low >>> 2) & 0x3
+                // --- 新フィールド ---
+                systemStruBits: p.systemStruBits,
+                systemStruBitsStr: p.systemStruBitsBits,
+                regionCount: st ? st.regionCount : null,
+                isTwin: st ? st.isTwin : null,
+                colorSpec1: p.colorSpec1,
+                colorSpec2: p.colorSpec2,
+                dataPosition: p.dataPosition,
+                webDataKind: p.webDataKind,
+                userIdBit: p.userIdBit,
+                paddingExt: p.paddingExt,
+                managementBits48: bits,
+                // --- 既存コードが参照するキー ---
+                qrNo: p.qrNo,
+                colorCountBits: colorCountBits,
+                colorSpecBits: p.colorSpec1,
+                dataCompBits: p.dataCompBits,
+                regionIndexBits: 0,                 // 48ビット版では廃止
+                sameDataFlag: p.sameDataFlag,
+                sysEncFlag: p.sysEncFlag,
+                appEncFlag: p.appEncFlag,
+                encryptionBits: (p.sysEncFlag ? 2 : 0) | (p.appEncFlag ? 1 : 0),
+                dataTypeBits: 0,                    // 48ビット版では廃止
+                hasDateTime: p.hasDateTime,
+                hasExpiry: p.hasExpiry,
+                hasReaderId: p.hasReaderId,
+                hasImageId: p.hasImageId,
+                hasLocation: p.hasLocation,
+                hasMunicipality: p.hasMunicipality,
+                readLimitBits: p.readLimitBits
             };
         }
 

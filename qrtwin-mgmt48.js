@@ -1,0 +1,511 @@
+/* =============================================================================
+ * QRツイン 管理部48ビット 共通モジュール
+ *
+ * 生成ソフト（QR Twin Generator）と読取ソフト（index.html）の両方がこれを読み込む。
+ * 仕様の解釈が2箇所に分かれてズレることを防ぐため、
+ * 管理部・拡張管理部・構造導出・役割展開は必ずここを経由する。
+ *
+ * 旧32ビット管理部とは非互換。
+ * ============================================================================= */
+(function (root, factory) {
+  var api = factory();
+  if (typeof module === "object" && module.exports) module.exports = api;   // Node
+  if (root) root.QRTwinMgmt48 = api;                                        // ブラウザ
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  "use strict";
+
+  /* ---------------------------------------------------------------------------
+   * 1. 管理部48ビットのフィールド定義
+   *    位置は1始まり（仕様書の表記に合わせる）。先頭が最上位ビット。
+   * ------------------------------------------------------------------------- */
+  var FIELDS = [
+    { key: "qrNo",            pos: 1,  width: 3 },  // 論理QR番号 0=第1LQR … 5=第6LQR
+    { key: "systemStruBits",  pos: 4,  width: 4 },  // 物理構造
+    { key: "colorSpec1",      pos: 8,  width: 8 },  // 第1PQRの使用色ビットマップ
+    { key: "colorSpec2",      pos: 16, width: 8 },  // 第2PQRの使用色ビットマップ（単一QRは0）
+    { key: "dataCompBits",    pos: 24, width: 3 },  // データ構成（論理構造）
+    { key: "dataPosition",    pos: 27, width: 2 },  // 領域がデータ部にWEBデータIDを持つか
+    { key: "webDataKind",     pos: 29, width: 3 },  // WEBデータ種別
+    { key: "sameDataFlag",    pos: 32, width: 1 },
+    { key: "sysEncFlag",      pos: 33, width: 1 },
+    { key: "appEncFlag",      pos: 34, width: 1 },
+    { key: "hasDateTime",     pos: 35, width: 1 },
+    { key: "hasExpiry",       pos: 36, width: 1 },
+    { key: "hasReaderId",     pos: 37, width: 1 },
+    { key: "hasImageId",      pos: 38, width: 1 },  // 電子署名で表示する画像のID
+    { key: "hasLocation",     pos: 39, width: 1 },
+    { key: "hasMunicipality", pos: 40, width: 1 },
+    { key: "readLimitBits",   pos: 41, width: 2 },  // 0=無制限 1=1回 2=3回 3=5回
+    { key: "userIdBit",       pos: 43, width: 1 },
+    { key: "paddingExt",      pos: 44, width: 2 },  // 埋め草領域への溢れ収容
+    { key: "reserved",        pos: 46, width: 3 }
+  ];
+  var MGMT_BITS = 48;
+
+  /* ---------------------------------------------------------------------------
+   * 2. systemStruBits → 物理構造
+   *    領域(LQR)数 = 各PQRのプレーン数の合計。プレーン数 = log2(色数)。
+   *    ただし 1000 だけは埋草領域を第2領域として使うため別扱い。
+   * ------------------------------------------------------------------------- */
+  var SYSTEM_STRUCTURES = {
+    // --- QRツイン（物理QR 2枚） ---
+    "0000": { label: "QRツイン 白黒＋白黒", isTwin: true,  colors: [2, 2], regionCount: 2 },
+    "0001": { label: "QRツイン 白黒＋4色",  isTwin: true,  colors: [2, 4], regionCount: 3 },
+    "0010": { label: "QRツイン 白黒＋8色",  isTwin: true,  colors: [2, 8], regionCount: 4 },
+    "0100": { label: "QRツイン 4色＋4色",   isTwin: true,  colors: [4, 4], regionCount: 4 },
+    "0101": { label: "QRツイン 4色＋8色",   isTwin: true,  colors: [4, 8], regionCount: 5 },
+    "0110": { label: "QRツイン 8色＋8色",   isTwin: true,  colors: [8, 8], regionCount: 6 },
+    // --- QRコード（物理QR 1枚） ---
+    "1000": { label: "QRコード 白黒",       isTwin: false, colors: [2],    regionCount: 2, secondRegionIsPadding: true },
+    "1001": { label: "QRコード カラー4色",  isTwin: false, colors: [4],    regionCount: 2 },
+    "1010": { label: "QRコード カラー8色",  isTwin: false, colors: [8],    regionCount: 3 },
+    // --- QRコード++（値のみ予約。今回は生成しない） ---
+    "1100": { label: "QRコード++ 白黒",     isTwin: false, colors: [2],    regionCount: 2, secondRegionIsAddon: true, notImplemented: true }
+  };
+
+  // 既定の使用色ビットマップ（位置は 黒・青・赤・紫・黄・シアン・緑・白 の順）
+  var DEFAULT_COLOR_SPEC_1ST = 0xA9; // 10101001 黒赤黄白
+  var DEFAULT_COLOR_SPEC_2ND = 0xC3; // 11000011 黒青緑白
+  var COLOR_SPEC_ALL8        = 0xFF; // 11111111 全色
+
+  var planesOf = function (colorCount) {
+    return colorCount === 8 ? 3 : (colorCount === 4 ? 2 : 1);
+  };
+
+  /**
+   * systemStruBits から構造を導出する。
+   * @returns {object} isTwin / pqrCount / colors / planes / regionCount / lqrToPqr
+   *   lqrToPqr[i] は 第(i+1)LQR の割当先 { pqr: 1|2, plane: 1..3 } または
+   *   { pqr: 1, padding: true }（1000 の第2領域）
+   */
+  function deriveStructure(systemStruBits) {
+    var key = normalizeBits(systemStruBits, 4);
+    var def = SYSTEM_STRUCTURES[key];
+    if (!def) return null;
+    var planes = def.colors.map(planesOf);
+    var lqrToPqr = [];
+    if (def.secondRegionIsPadding || def.secondRegionIsAddon) {
+      // 第1LQR＝シンボル本体、第2LQR＝埋草領域（1000）または付加領域（1100）
+      lqrToPqr.push({ pqr: 1, plane: 1 });
+      lqrToPqr.push(def.secondRegionIsPadding ? { pqr: 1, padding: true } : { pqr: 1, addon: true });
+    } else {
+      // 第1PQRが若い番号のLQRから順に取る
+      for (var p = 0; p < planes.length; p++) {
+        for (var k = 1; k <= planes[p]; k++) lqrToPqr.push({ pqr: p + 1, plane: k });
+      }
+    }
+    return {
+      bits: key,
+      label: def.label,
+      isTwin: def.isTwin,
+      notImplemented: !!def.notImplemented,
+      pqrCount: def.colors.length,
+      colors: def.colors.slice(),
+      planes: planes,
+      regionCount: def.regionCount,
+      secondRegionIsPadding: !!def.secondRegionIsPadding,
+      secondRegionIsAddon: !!def.secondRegionIsAddon,
+      lqrToPqr: lqrToPqr
+    };
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 3. dataCompBits → 各LQRの役割と連続グループ
+   *
+   *    3領域以上は「3つの役割」を領域数に応じて引き伸ばす。
+   *      役割A = 第1LQR ／ 役割B = 第2〜第(N-1)LQR ／ 役割C = 第N LQR
+   *    連続になるかは各ケースに明記された指定のみで決まる（役割Bの展開＝連続ではない）。
+   * ------------------------------------------------------------------------- */
+  var ROLE = { PUBLIC: "公開", ENCRYPTED: "暗号化", SIGNATURE: "電子署名" };
+
+  var DATA_COMP_PLANS = {
+    // --- 2領域専用 ---
+    "000": { regions: 2, label: "公開＋公開",           roles: [ROLE.PUBLIC, ROLE.PUBLIC],    continuous: null },
+    "001": { regions: 2, label: "公開＋暗号化",         roles: [ROLE.PUBLIC, ROLE.ENCRYPTED], continuous: null },
+    "010": { regions: 2, label: "公開＋電子署名",       roles: [ROLE.PUBLIC, ROLE.SIGNATURE], continuous: null },
+    "011": { regions: 2, label: "公開＋公開（連続）",   roles: [ROLE.PUBLIC, ROLE.PUBLIC],    continuous: "all" },
+    // --- 3領域以上（役割A/B/Cで表現） ---
+    "100": { regions: 3, label: "ケース1 独立公開",     roleABC: [ROLE.PUBLIC, ROLE.PUBLIC,    ROLE.PUBLIC],    continuous: null },
+    "101": { regions: 3, label: "ケース2 全体連続",     roleABC: [ROLE.PUBLIC, ROLE.PUBLIC,    ROLE.PUBLIC],    continuous: "all" },
+    "110": { regions: 3, label: "ケース3 第2以降連続",  roleABC: [ROLE.PUBLIC, ROLE.ENCRYPTED, ROLE.ENCRYPTED], continuous: "fromSecond" },
+    "111": { regions: 3, label: "ケース4 署名付き",     roleABC: [ROLE.PUBLIC, ROLE.ENCRYPTED, ROLE.SIGNATURE], continuous: "roleB" }
+  };
+
+  /**
+   * 領域数とdataCompBitsから、LQRごとの役割と連続グループを解決する。
+   * @returns {object} lqrs[] / continuousGroups[][] / signatureLqr / inputSlots[]
+   */
+  function resolveLqrPlan(systemStruBits, dataCompBits) {
+    var st = deriveStructure(systemStruBits);
+    if (!st) return null;
+    var code = normalizeBits(dataCompBits, 3);
+    var plan = DATA_COMP_PLANS[code];
+    if (!plan) return null;
+    var N = st.regionCount;
+    // 2領域用コードと3領域以上用コードの取り違えを弾く
+    if ((N === 2) !== (plan.regions === 2)) return null;
+
+    var roles = [];
+    var i;
+    if (N === 2) {
+      roles = plan.roles.slice();
+    } else {
+      for (i = 1; i <= N; i++) {
+        if (i === 1) roles.push(plan.roleABC[0]);
+        else if (i === N) roles.push(plan.roleABC[2]);
+        else roles.push(plan.roleABC[1]);
+      }
+    }
+
+    // 連続グループの解決（長さ1のグループは連続とみなさない）
+    var groups = [];
+    var seq = function (from, to) {
+      var a = [];
+      for (var v = from; v <= to; v++) a.push(v);
+      return a;
+    };
+    if (plan.continuous === "all") groups.push(seq(1, N));
+    else if (plan.continuous === "fromSecond") groups.push(seq(2, N));
+    else if (plan.continuous === "roleB") groups.push(seq(2, N - 1));
+    groups = groups.filter(function (g) { return g.length >= 2; });
+
+    var lqrs = [];
+    for (i = 1; i <= N; i++) {
+      var gi = -1;
+      for (var g = 0; g < groups.length; g++) if (groups[g].indexOf(i) >= 0) gi = g;
+      lqrs.push({
+        lqr: i,
+        role: roles[i - 1],
+        continuousGroup: gi >= 0 ? gi : null,
+        assign: st.lqrToPqr[i - 1] || null
+      });
+    }
+
+    var signatureLqr = null;
+    for (i = 0; i < lqrs.length; i++) if (lqrs[i].role === ROLE.SIGNATURE) signatureLqr = lqrs[i].lqr;
+
+    // UIに出す入力欄（連続グループは1欄にまとめ、署名は自動生成なので欄を出さない）
+    var slots = [];
+    var used = {};
+    for (i = 0; i < lqrs.length; i++) {
+      var e = lqrs[i];
+      if (e.role === ROLE.SIGNATURE) continue;
+      if (e.continuousGroup !== null) {
+        if (used["g" + e.continuousGroup]) continue;
+        used["g" + e.continuousGroup] = true;
+        slots.push({ kind: "continuous", role: e.role, lqrs: groups[e.continuousGroup].slice() });
+      } else {
+        slots.push({ kind: "single", role: e.role, lqrs: [e.lqr] });
+      }
+    }
+
+    return {
+      structure: st,
+      dataCompBits: code,
+      label: plan.label,
+      regionCount: N,
+      lqrs: lqrs,
+      continuousGroups: groups,
+      signatureLqr: signatureLqr,
+      inputSlots: slots
+    };
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 4. 管理部48ビットの組立・解析
+   * ------------------------------------------------------------------------- */
+  function normalizeBits(v, width) {
+    if (typeof v === "number") return toBits(v, width);
+    var s = String(v == null ? "" : v).replace(/[^01]/g, "");
+    if (s.length === width) return s;
+    if (s.length < width) return s.padStart(width, "0");
+    return s.slice(-width);
+  }
+  function toBits(value, width) {
+    var n = Math.max(0, Number(value) || 0) >>> 0;
+    return n.toString(2).padStart(width, "0").slice(-width);
+  }
+
+  /**
+   * 管理部48ビットを組み立てる。
+   * @param {object} parts 各フィールド値（数値 or ビット文字列。真偽値も可）
+   * @returns {object} { bits, high16, mid16, low16 }
+   */
+  function buildMgmt48(parts) {
+    var p = parts || {};
+    var out = "";
+    for (var i = 0; i < FIELDS.length; i++) {
+      var f = FIELDS[i];
+      var v = p[f.key];
+      if (v === undefined || v === null) v = 0;
+      if (typeof v === "boolean") v = v ? 1 : 0;
+      out += (typeof v === "string") ? normalizeBits(v, f.width) : toBits(v, f.width);
+    }
+    if (out.length !== MGMT_BITS) throw new Error("管理部のビット数が不正です: " + out.length);
+    return {
+      bits: out,
+      high16: parseInt(out.slice(0, 16), 2),
+      mid16: parseInt(out.slice(16, 32), 2),
+      low16: parseInt(out.slice(32, 48), 2)
+    };
+  }
+
+  /**
+   * 管理部48ビットを解析する。
+   * @param {string|object} src 48文字のビット列、または { high16, mid16, low16 }
+   */
+  function parseMgmt48(src) {
+    var bits;
+    if (typeof src === "string") {
+      bits = src.replace(/[^01]/g, "");
+    } else if (src && typeof src === "object") {
+      if (src.high16 === undefined || src.mid16 === undefined || src.low16 === undefined) return null;
+      bits = toBits(src.high16, 16) + toBits(src.mid16, 16) + toBits(src.low16, 16);
+    } else {
+      return null;
+    }
+    if (bits.length !== MGMT_BITS) return null;
+    var r = { bits: bits };
+    for (var i = 0; i < FIELDS.length; i++) {
+      var f = FIELDS[i];
+      var seg = bits.substr(f.pos - 1, f.width);
+      r[f.key] = parseInt(seg, 2);
+      if (f.width === 1) r[f.key] = r[f.key] === 1;   // 1ビットは真偽値で返す
+      r[f.key + "Bits"] = seg;
+    }
+    // 数値で扱いたいものは数値のまま残す
+    r.qrNo = parseInt(bits.substr(0, 3), 2);
+    return r;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 5. 拡張管理部
+   *    管理部のビット位置が早い順に、固定幅で連結する。
+   *    長さフィールドは持たない（フラグを見れば構成が確定するため）。
+   * ------------------------------------------------------------------------- */
+  var EXT_ITEMS = [
+    { key: "creationDateTime", width: 32, when: function (m) { return !!m.hasDateTime; } },
+    { key: "expiry",           width: 32, when: function (m) { return !!m.hasExpiry; } },
+    { key: "readerId",         width: 32, when: function (m) { return !!m.hasReaderId; } },
+    { key: "imageId",          width: 32, when: function (m) { return !!m.hasImageId; } },
+    { key: "location",         width: 48, when: function (m) { return !!m.hasLocation; } },   // 緯度24＋経度24
+    { key: "municipality",     width: 24, when: function (m) { return !!m.hasMunicipality; } },
+    { key: "qrTwinUniqueId",   width: 8,  when: function (m) { return (m.readLimitBits || 0) > 0; } },
+    { key: "userId",           width: 32, when: function (m) { return !!m.userIdBit; } }
+  ];
+  var EXT_MAX_BITS = EXT_ITEMS.reduce(function (a, b) { return a + b.width; }, 0);  // 240
+
+  /** 拡張管理部を組み立てる。values は { creationDateTime: 数値, location: {lat, lon} … } */
+  function buildMgmtExt(mgmt, values) {
+    var v = values || {};
+    var out = "";
+    for (var i = 0; i < EXT_ITEMS.length; i++) {
+      var it = EXT_ITEMS[i];
+      if (!it.when(mgmt)) continue;
+      if (it.key === "location") {
+        var loc = v.location || {};
+        out += toBits(loc.lat, 24) + toBits(loc.lon, 24);
+      } else {
+        out += toBits(v[it.key], it.width);
+      }
+    }
+    return out;
+  }
+
+  /** 拡張管理部を解析する。bits は管理部48ビットの直後から始まるビット列。 */
+  function parseMgmtExt(mgmt, bits) {
+    var s = String(bits || "").replace(/[^01]/g, "");
+    var r = {}, off = 0;
+    for (var i = 0; i < EXT_ITEMS.length; i++) {
+      var it = EXT_ITEMS[i];
+      if (!it.when(mgmt)) continue;
+      if (off + it.width > s.length) return null;   // 足りない＝壊れている
+      var seg = s.substr(off, it.width);
+      off += it.width;
+      if (it.key === "location") {
+        r.location = { lat: parseInt(seg.slice(0, 24), 2), lon: parseInt(seg.slice(24), 2) };
+      } else {
+        r[it.key] = parseInt(seg, 2);
+      }
+    }
+    r._consumedBits = off;
+    return r;
+  }
+
+  /** そのフラグ構成で拡張管理部が何ビットになるかを返す */
+  function mgmtExtBitLength(mgmt) {
+    var n = 0;
+    for (var i = 0; i < EXT_ITEMS.length; i++) if (EXT_ITEMS[i].when(mgmt)) n += EXT_ITEMS[i].width;
+    return n;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 6. 整合性チェック（R1〜R5）
+   * ------------------------------------------------------------------------- */
+  function validateMgmt(mgmt) {
+    var errors = [];
+    var st = deriveStructure(mgmt.systemStruBitsBits || toBits(mgmt.systemStruBits, 4));
+    if (!st) { return { ok: false, errors: ["systemStruBits が未定義の値です"] }; }
+    if (st.notImplemented) errors.push(st.label + " は今回の実装対象外です");
+
+    var N = st.regionCount;
+    var plan = resolveLqrPlan(st.bits, toBits(mgmt.dataCompBits, 3));
+    if (!plan) errors.push("dataCompBits が領域数(" + N + ")に対応していません");
+
+    // qrNo は領域数の範囲内
+    if (mgmt.qrNo >= N) errors.push("qrNo(" + mgmt.qrNo + ") が領域数(" + N + ")を超えています");
+
+    var dp = mgmt.dataPosition || 0;
+    var wk = mgmt.webDataKind || 0;
+
+    // R1: 3領域以上は dataPosition / webDataKind とも 0
+    if (N >= 3) {
+      if (dp !== 0) errors.push("R1: 3領域以上では dataPosition は00固定です");
+      if (wk !== 0) errors.push("R1: 3領域以上では WebDataKind は000固定です");
+    }
+    // R2 / R3: dataPosition と webDataKind は同時に立つか同時に0
+    if (dp !== 0 && wk === 0) errors.push("R2: dataPosition が指定されている場合 WebDataKind は必須です");
+    if (dp === 0 && wk !== 0) errors.push("R3: dataPosition が00の場合 WebDataKind は000にしてください");
+    if (dp === 3) errors.push("dataPosition の 11 は未定義です");
+    if (wk === 6 || wk === 7) errors.push("WebDataKind の 110/111 は未定義です");
+
+    // R4: dataPosition が指すLQRが電子署名であってはならない
+    if (plan && dp !== 0) {
+      var target = (dp === 1) ? 2 : 1;   // 01=第2LQR / 10=第1LQR
+      if (plan.signatureLqr === target) errors.push("R4: 電子署名のLQRを WEBデータID で置き換えることはできません");
+    }
+
+    // sameDataFlag / paddingExt は 0000 と 1001 のみ
+    var allowSame = (st.bits === "0000" || st.bits === "1001");
+    if (mgmt.sameDataFlag && !allowSame) errors.push("sameDataFlag は 0000 と 1001 でのみ有効です");
+    if ((mgmt.paddingExt || 0) !== 0) {
+      if (!allowSame) errors.push("paddingExt は 0000 と 1001 でのみ有効です");
+      if (mgmt.sameDataFlag) errors.push("sameData が有効なとき paddingExt は00にしてください");
+      if ((mgmt.paddingExt || 0) === 3) errors.push("paddingExt の 11 は未定義です");
+    }
+
+    // 暗号化フラグと dataCompBits の整合
+    if (plan) {
+      var hasEnc = plan.lqrs.some(function (e) { return e.role === ROLE.ENCRYPTED; });
+      if (hasEnc && !mgmt.appEncFlag && !mgmt.sysEncFlag) {
+        errors.push("暗号化領域があるのに sysEncFlag / appEncFlag がどちらも立っていません");
+      }
+    }
+    // 単一QRは第2PQRの色指定を持たない
+    if (!st.isTwin && (mgmt.colorSpec2 || 0) !== 0) errors.push("単一QR構成では 2nd PQR colorSpecBits は0にしてください");
+
+    return { ok: errors.length === 0, errors: errors, structure: st, plan: plan };
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 7. モジュール配置（色プレーンの逆順配置に使う）
+   *
+   *    読取側 jsQR の buildFunctionPatternMask / readCodewords と同じ規則。
+   *    生成ソフトの汚損機能にも同じ実装が別に存在していたため、ここへ集約する。
+   * ------------------------------------------------------------------------- */
+
+  /** 型番から位置合わせパターンの中心座標を得る（qrcode.js があればそれを使う） */
+  function alignmentCentersOf(typeNumber, provided) {
+    if (Array.isArray(provided)) return provided;
+    var g = (typeof globalThis !== "undefined" ? globalThis : null);
+    if (g && g.qrcode && typeof g.qrcode.getAlignmentPositions === "function") {
+      return g.qrcode.getAlignmentPositions(typeNumber) || [];
+    }
+    return [];
+  }
+
+  /** 機能パターン（ファインダ・タイミング・位置合わせ等）のマスクを作る */
+  function functionPatternMask(typeNumber, alignmentCenters) {
+    var dim = 17 + 4 * typeNumber;
+    var M = [];
+    for (var y = 0; y < dim; y++) {
+      M.push(new Array(dim).fill(false));
+    }
+    var reg = function (x, y, w, h) {
+      for (var j = y; j < y + h; j++) {
+        for (var i = x; i < x + w; i++) {
+          if (i >= 0 && j >= 0 && i < dim && j < dim) M[j][i] = true;
+        }
+      }
+    };
+    reg(0, 0, 9, 9); reg(dim - 8, 0, 8, 9); reg(0, dim - 8, 9, 8);
+    var centers = alignmentCentersOf(typeNumber, alignmentCenters);
+    for (var a = 0; a < centers.length; a++) {
+      for (var b = 0; b < centers.length; b++) {
+        var cx = centers[a], cy = centers[b];
+        if (!(cx === 6 && cy === 6 || cx === 6 && cy === dim - 7 || cx === dim - 7 && cy === 6)) {
+          reg(cx - 2, cy - 2, 5, 5);
+        }
+      }
+    }
+    reg(6, 9, 1, dim - 17); reg(9, 6, dim - 17, 1);
+    if (typeNumber > 6) { reg(dim - 11, 0, 3, 6); reg(0, dim - 11, 6, 3); }
+    return M;
+  }
+
+  /**
+   * データモジュールの走査順（右下から始まるジグザグ）を返す。
+   * 要素は [列, 行]。先頭がビット0の置き場所。
+   */
+  function dataModuleOrder(typeNumber, alignmentCenters) {
+    var dim = 17 + 4 * typeNumber;
+    var fm = functionPatternMask(typeNumber, alignmentCenters);
+    var order = [];
+    var up = true;
+    for (var col = dim - 1; col > 0; col -= 2) {
+      if (col === 6) col--;
+      for (var i = 0; i < dim; i++) {
+        var y = up ? dim - 1 - i : i;
+        for (var off = 0; off < 2; off++) {
+          var x = col - off;
+          if (!fm[y][x]) order.push([x, y]);
+        }
+      }
+      up = !up;
+    }
+    return order;
+  }
+
+  /**
+   * ★逆順配置：第2領域のビットを走査順の逆から詰めるための並びを返す。
+   *
+   * 4色QRコード（systemStruBits=1001）で同一データを入れる場合、
+   * 2つの領域は同じ物理モジュールを共有するため、素直に並べると
+   * 汚れが両領域の同じコード語を同時に壊してしまい冗長性が得られない。
+   * 第2領域だけ逆順に詰めることで、同じ汚れが両領域の別々のコード語に散り、
+   * 段階2（ブロック単位の採用）・段階3（消失訂正）が機能するようになる。
+   */
+  function reversedModuleOrder(order) {
+    return order.slice().reverse();
+  }
+
+  /** 逆順配置が必要な構成か（1001 かつ同一データのときのみ） */
+  function needsReversedSecondPlane(systemStruBits, sameDataFlag) {
+    return normalizeBits(systemStruBits, 4) === "1001" && !!sameDataFlag;
+  }
+
+  /* ------------------------------------------------------------------------- */
+  return {
+    MGMT_BITS: MGMT_BITS,
+    functionPatternMask: functionPatternMask,
+    dataModuleOrder: dataModuleOrder,
+    reversedModuleOrder: reversedModuleOrder,
+    needsReversedSecondPlane: needsReversedSecondPlane,
+    EXT_MAX_BITS: EXT_MAX_BITS,
+    FIELDS: FIELDS,
+    ROLE: ROLE,
+    SYSTEM_STRUCTURES: SYSTEM_STRUCTURES,
+    DATA_COMP_PLANS: DATA_COMP_PLANS,
+    DEFAULT_COLOR_SPEC_1ST: DEFAULT_COLOR_SPEC_1ST,
+    DEFAULT_COLOR_SPEC_2ND: DEFAULT_COLOR_SPEC_2ND,
+    COLOR_SPEC_ALL8: COLOR_SPEC_ALL8,
+    deriveStructure: deriveStructure,
+    resolveLqrPlan: resolveLqrPlan,
+    buildMgmt48: buildMgmt48,
+    parseMgmt48: parseMgmt48,
+    buildMgmtExt: buildMgmtExt,
+    parseMgmtExt: parseMgmtExt,
+    mgmtExtBitLength: mgmtExtBitLength,
+    validateMgmt: validateMgmt
+  };
+});
