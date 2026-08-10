@@ -1828,6 +1828,29 @@ function decodeTwinCombined(rawA, rawB, options) {
             comparedCodewords: comparedCodewords,
             mismatchCodewords: mismatchCodewords
         };
+        // ★同一データツインでない2枚を弾く。
+        //   同一データなら2枚のコード語は本来一致し、差分は読み取り誤りと汚損だけになる。
+        //   内容の異なる第1QR/第2QRを突き合わせると不一致がほぼ全数になり、
+        //   突き合わせても意味がないばかりか、両方が訂正成功したときに
+        //   誤った方を採ってしまう危険がある。
+        var eccTotal = 0;
+        for (var bi0 = 0; bi0 < blocksA.length; bi0++) {
+            eccTotal += blocksA[bi0].codewords.length - blocksA[bi0].numDataCodewords;
+        }
+        if (mismatchCodewords > eccTotal) {
+            if (options && typeof options === "object") {
+                options.twinDiag = {
+                    failReason: "同一データツインではない（不一致" + mismatchCodewords
+                        + " > 訂正余力" + eccTotal + "）",
+                    mismatchCodewords: mismatchCodewords,
+                    comparedCodewords: comparedCodewords,
+                    blockCount: blocksA.length,
+                    bothOk: 0, agreed: 0, disagreed: 0, onlyA: 0, onlyB: 0,
+                    mergedOk: 0, bothFailed: 0
+                };
+            }
+            return null;
+        }
         var totalBytes = blocksA.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
         var resultBytes = new Uint8ClampedArray(totalBytes);
         var resultIndex = 0;

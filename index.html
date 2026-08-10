@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader21</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2947,7 +2947,11 @@
             const stats = getScanDebugStats();
             stats.qrMeta[String(qrNo)] = {
                 type: qrTypeLabel(mgmtInfo, modeHint),
-                mgmtCode32: (mc32 !== null && mc32 !== undefined) ? ('0x' + (mc32 >>> 0).toString(16)) : null,
+                // ★Ver3.1：mc32 は48ビットのビット列（文字列）。>>> は使えない。
+                //   4ビットずつ12桁の16進で表示する。
+                mgmtCode32: (typeof mc32 === 'string' && mc32.length === 48)
+                    ? ('0x' + mc32.match(/.{4}/g).map(function (b) { return parseInt(b, 2).toString(16); }).join(''))
+                    : ((mc32 !== null && mc32 !== undefined) ? String(mc32) : null),
                 pattern: item.patternInfo || null,
                 hasDateTime: !!(mgmtInfo && mgmtInfo.hasDateTime),
                 hasExpiry: !!(mgmtInfo && mgmtInfo.hasExpiry),
