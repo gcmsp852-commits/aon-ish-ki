@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader22</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -6684,8 +6684,28 @@
             };
         }
 
+        // ★Ver3.1：色多重化しているPQRの「色数」でデコーダを選ぶ。
+        //   従来は領域数で分岐していたが、4色＋4色(0100) も領域数4のため
+        //   8色デコーダを誤って選んでしまう。また色指定は第2PQRのもの(colorSpec2)を使う。
+        //   （第1PQRは白黒構成では 0x81 になり、4色パレットとして使えない）
         function getNewColorDecoder(mgmtInfo) {
             if (!mgmtInfo) return null;
+            const M = window.QRTwinMgmt48;
+            const st = (M && mgmtInfo.systemStruBitsStr) ? M.deriveStructure(mgmtInfo.systemStruBitsStr) : null;
+            if (st && st.planes && st.planes.length) {
+                // 色プレーンを2枚以上持つPQRを探す（現状の読取対象は第2PQR）
+                let idx = -1;
+                for (let i = st.planes.length - 1; i >= 0; i--) {
+                    if (st.planes[i] >= 2) { idx = i; break; }
+                }
+                if (idx < 0) return null;
+                const colors = st.colors[idx];
+                const spec = (idx === 0) ? mgmtInfo.colorSpec1 : mgmtInfo.colorSpec2;
+                if (colors === 8) return buildQuadColorDecoder();
+                if (colors === 4) return buildTriColorDecoder(spec);
+                return null;
+            }
+            // 構造が取れない場合は従来の判定にフォールバック
             if (mgmtInfo.regionCount === 3) return buildTriColorDecoder(mgmtInfo.colorSpecBits);
             if (mgmtInfo.regionCount === 4) return buildQuadColorDecoder();
             return null;
@@ -8523,6 +8543,12 @@
         function parseNewColorMgmt(managementCode, managementFlags16 = 0) {
             const base = parseStandardMgmt(managementCode, managementFlags16);
             if (!base) return null;
+            // ★Ver3.1：領域数は systemStruBits から導出した値を使う。
+            //   旧2ビットの colorCountBits から再計算すると、最大色数が同じでも
+            //   構成が異なるもの（4色＋4色=4領域 と 白黒＋4色=3領域）を区別できない。
+            if (base.regionCount) {
+                return { ...base };
+            }
             let regionCount = 2;
             if (base.colorCountBits === 2) regionCount = 3; // 10 = 4色 = 3-region
             if (base.colorCountBits === 3) regionCount = 4; // 11 = 8色 = 4-region
