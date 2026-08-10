@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader20</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -5773,21 +5773,23 @@
             const m32 = getManagementCode32FromQr(qr);
             if (m32 === null || m32 === undefined) return true; // 管理部が読めない＝通常QR
 
-            const high = (m32 >>> 16) & 0xFFFF;
-            const low = m32 & 0xFFFF;
-            const qrNo = (high >>> 14) & 0x3;
-            const colorCount = (high >>> 12) & 0x3;
-            const colorSpec = (high >>> 4) & 0xFF;
-            const regionIndex = high & 0x3;
-            const reserved = low & 0x3;
-
-            if (qrNo > 1) return true;
-            if (colorCount === 1) return true;
-            if (regionIndex !== 0) return true;
-            if (reserved !== 0) return true;
-            if (colorCount === 0 && colorSpec !== PLAIN_QR_COLOR_SPEC_2COLOR) return true;
-            if (colorCount === 2 && popcount8(colorSpec) !== 4) return true;
-            if (colorCount === 3 && colorSpec !== PLAIN_QR_COLOR_SPEC_4REGION) return true;
+            // ★Ver3.1：管理部48ビットで判定する。
+            //   通常QRには管理部が無く、jsQRは埋め草(0xEC/0x11の繰り返し)を
+            //   管理部として読む。その並びがQRツインの管理部として成立しないことを利用する。
+            const M = window.QRTwinMgmt48;
+            if (!M) return true;
+            if (typeof m32 !== 'string' || m32.length !== 48) return true;
+            const p = M.parseMgmt48(m32);
+            if (!p) return true;
+            // 予備ビットは常に0。0でなければQRツインの管理部ではない
+            if (p.reserved !== 0) return true;
+            // 未定義の構造値なら通常QR
+            const st = M.deriveStructure(p.systemStruBitsBits);
+            if (!st || st.notImplemented) return true;
+            // 論理QR番号が領域数を超えていれば通常QR
+            if (p.qrNo >= st.regionCount) return true;
+            // データ構成が領域数と噛み合わなければ通常QR
+            if (!M.resolveLqrPlan(p.systemStruBitsBits, p.dataCompBitsBits)) return true;
             return false;
         }
 
