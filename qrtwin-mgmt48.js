@@ -484,13 +484,141 @@
     return normalizeBits(systemStruBits, 4) === "1001" && !!sameDataFlag;
   }
 
+  /**
+   * LQRの並び（第1LQR, 第2LQR, …）を、物理QRごとのプレーン束へ振り分ける。
+   *
+   * 現行の生成ソフトは「第1PQR＝白黒1枚、第2PQR＝残り全部」という前提が
+   * 描画処理に直接埋め込まれている。この関数を通すことで、
+   * 第1PQRも複数プレーンを持つ構成（4色＋4色 など）へ拡張できる。
+   *
+   * @param {string} systemStruBits 構造4ビット
+   * @param {Array} lqrItems 第1LQRから順に並べた任意の要素（行列など）
+   * @returns {Array<{pqr:number, colorCount:number, planeCount:number, planes:Array,
+   *                  isPadding:boolean, isAddon:boolean}>} PQRごとの束（第1PQRから順）
+   */
+  function groupPlanesByPqr(systemStruBits, lqrItems) {
+    var st = deriveStructure(systemStruBits);
+    if (!st) return null;
+    var items = lqrItems || [];
+    var groups = [];
+    for (var p = 0; p < st.pqrCount; p++) {
+      groups.push({
+        pqr: p + 1,
+        colorCount: st.colors[p],
+        planeCount: st.planes[p],
+        planes: [],
+        isPadding: false,
+        isAddon: false
+      });
+    }
+    for (var i = 0; i < st.lqrToPqr.length; i++) {
+      var a = st.lqrToPqr[i];
+      var g = groups[a.pqr - 1];
+      if (!g) continue;
+      if (a.padding) { g.isPadding = true; continue; }   // 1000：埋草領域は色プレーンではない
+      if (a.addon) { g.isAddon = true; continue; }       // 1100：付加領域（今回は生成しない）
+      g.planes.push(items[i]);
+    }
+    return groups;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 8. プレーン ↔ 色の対応
+   *
+   *    1つのPQRは色数に応じて複数のビットプレーン（＝LQR）を運ぶ。
+   *    各モジュールの色は、そのモジュールにおける各プレーンの明暗の組で決まる。
+   *    生成側と読取側でこの対応がズレると全滅するため、ここに一本化する。
+   *
+   *    色の並びは管理部 colorSpecBits と同じ：黒・青・赤・紫・黄・シアン・緑・白
+   * ------------------------------------------------------------------------- */
+  var COLOR_NAMES = ["black", "blue", "red", "purple", "yellow", "cyan", "green", "white"];
+  var COLOR_RGB_TABLE = {
+    black:  [0, 0, 0],     blue:  [0, 0, 255],   red:   [255, 0, 0],   purple: [255, 0, 255],
+    yellow: [255, 255, 0], cyan:  [0, 255, 255], green: [0, 255, 0],   white:  [255, 255, 255]
+  };
+
+  // 3プレーン（8色）の対応表。生成ソフトの drawQuadColorQR と同一。
+  //   添字 = (p1<<2)|(p2<<1)|p3   （1=暗, 0=明）
+  var PLANE3_TO_COLOR = [7, 4, 5, 6, 3, 2, 1, 0];
+  //   000→白(7) 001→黄(4) 010→シアン(5) 011→緑(6)
+  //   100→紫(3) 101→赤(2)  110→青(1)     111→黒(0)
+
+  // 1プレーン（白黒）：暗→黒(0) / 明→白(7)
+  var PLANE1_TO_COLOR = [7, 0];
+
+  /** colorSpecBits(8bit) で「使用する」とされた色の番号一覧を返す（暗い順＝上位ビット順） */
+  function colorsFromSpec(colorSpec) {
+    var list = [];
+    for (var i = 0; i < 8; i++) {
+      if (((colorSpec >> (7 - i)) & 1) === 1) list.push(i);
+    }
+    return list;
+  }
+
+  /**
+   * プレーンの明暗の組から色番号(0..7)を求める。
+   * @param {boolean[]} planeBits 各プレーンの暗さ（true=暗）。長さ1〜3。
+   * @param {number} [colorSpec] 4色構成のときに使う使用色ビットマップ。
+   *
+   * ・1プレーン（白黒）と3プレーン（8色）は固定表を使う。
+   *   既に発行済みのQRと互換を保つため、生成ソフトの既存テーブルをそのまま採用している。
+   * ・2プレーン（4色）は colorSpecBits で指定された4色を、
+   *   上位ビット（暗い側）から順に「暗い組み合わせ」へ割り当てる。
+   *     両プレーン暗 → 指定色の1番目（最も暗い）
+   *     両プレーン明 → 指定色の4番目（最も明るい）
+   */
+  function planesToColorIndex(planeBits, colorSpec) {
+    var n = planeBits.length;
+    var v = 0;
+    for (var i = 0; i < n; i++) v = (v << 1) | (planeBits[i] ? 1 : 0);
+    if (n === 1) return PLANE1_TO_COLOR[v];
+    if (n === 3) return PLANE3_TO_COLOR[v];
+    if (n === 2) {
+      var colors = colorsFromSpec(colorSpec === undefined ? DEFAULT_COLOR_SPEC_1ST : colorSpec);
+      if (colors.length !== 4) return 7;
+      return colors[3 - v];   // v=3(両方暗)→最も暗い色 … v=0(両方明)→最も明るい色
+    }
+    return 7;
+  }
+
+  /** 色番号(0..7)から各プレーンの明暗へ戻す（読取側の逆変換） */
+  function colorIndexToPlanes(colorIndex, planeCount, colorSpec) {
+    var bits, i, v;
+    var table = (planeCount === 1) ? PLANE1_TO_COLOR
+              : (planeCount === 3) ? PLANE3_TO_COLOR : null;
+    if (table) {
+      for (v = 0; v < table.length; v++) {
+        if (table[v] === colorIndex) {
+          bits = [];
+          for (i = planeCount - 1; i >= 0; i--) bits.push(((v >> i) & 1) === 1);
+          return bits;
+        }
+      }
+      return null;
+    }
+    if (planeCount === 2) {
+      var colors = colorsFromSpec(colorSpec === undefined ? DEFAULT_COLOR_SPEC_1ST : colorSpec);
+      var pos = colors.indexOf(colorIndex);
+      if (pos < 0 || colors.length !== 4) return null;
+      v = 3 - pos;
+      return [((v >> 1) & 1) === 1, (v & 1) === 1];
+    }
+    return null;
+  }
+
   /* ------------------------------------------------------------------------- */
   return {
     MGMT_BITS: MGMT_BITS,
+    COLOR_NAMES: COLOR_NAMES,
+    COLOR_RGB_TABLE: COLOR_RGB_TABLE,
+    planesToColorIndex: planesToColorIndex,
+    colorIndexToPlanes: colorIndexToPlanes,
+    colorsFromSpec: colorsFromSpec,
     functionPatternMask: functionPatternMask,
     dataModuleOrder: dataModuleOrder,
     reversedModuleOrder: reversedModuleOrder,
     needsReversedSecondPlane: needsReversedSecondPlane,
+    groupPlanesByPqr: groupPlanesByPqr,
     EXT_MAX_BITS: EXT_MAX_BITS,
     FIELDS: FIELDS,
     ROLE: ROLE,

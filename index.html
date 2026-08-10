@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader23</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1985,6 +1985,9 @@
             lines.push('第2QR傾き角: ' + fmtAng(q2ang));
 
             lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
+            if (stats.newColorUnsupported) {
+                lines.push('★未対応の構成: ' + stats.newColorUnsupported);
+            }
             lines.push('BarcodeDetector間引き: ' + bdSkippedCount + '回スキップ / 連続空振り ' + bdZeroStreak + '回'
                 + (bdSkippedCount > 0 ? '（ツイン形式はBDで検出できないため自動間引き中）' : ''));
             // ★ 同一データツインの合成復元（段階2/3）の状況
@@ -6608,6 +6611,24 @@
         }
 
         function buildTriColorDecoder(colorSpecBits) {
+            // ★Ver3.1：生成側と同じ対応表（qrtwin-mgmt48.js）から組み立てる。
+            //   従来はここで独自の優先順位規則を使っており、
+            //   明色に白を含まない組み合わせ（黄/シアン など）で生成側と食い違っていた。
+            //   具体的には明色2色の割り当てが逆になり、復号ビットが誤る。
+            //   共通モジュールを使うことで、生成と読取の一致を構造的に保証する。
+            const MG = window.QRTwinMgmt48;
+            if (MG) {
+                const colorIdx = MG.colorsFromSpec(colorSpecBits);
+                if (colorIdx.length !== 4) return null;
+                const st = {};
+                for (let i = 0; i < colorIdx.length; i++) {
+                    const planes = MG.colorIndexToPlanes(colorIdx[i], 2, colorSpecBits);
+                    if (!planes) return null;
+                    st[MG.COLOR_NAMES[colorIdx[i]]] = [planes[0] ? 1 : 0, planes[1] ? 1 : 0];
+                }
+                return { candidates: Object.keys(st), states: st };
+            }
+            // 以降はモジュール未ロード時の保険（従来実装）
             const selected = [];
             for (let i = 0; i < TRI_COLOR_ORDER.length; i++) {
                 if ((colorSpecBits >> (7 - i)) & 1) {
@@ -6688,8 +6709,97 @@
         //   従来は領域数で分岐していたが、4色＋4色(0100) も領域数4のため
         //   8色デコーダを誤って選んでしまう。また色指定は第2PQRのもの(colorSpec2)を使う。
         //   （第1PQRは白黒構成では 0x81 になり、4色パレットとして使えない）
+        // ★Ver3.1：第1PQRも色多重化する構成（4色＋4色 など）かを判定する。
+        //   現行の newColor 経路は「1枚のカラーQRが第2〜第N領域すべてを持つ」前提で
+        //   組まれているため、この構成では領域の割り当てが食い違う。
+        //   未対応であることを明示し、誤ったデータを黙って通さないようにする。
+        function newColorNeedsPqr1Separation(mgmtInfo) {
+            const M = window.QRTwinMgmt48;
+            if (!M || !mgmtInfo || !mgmtInfo.systemStruBitsStr) return false;
+            const st = M.deriveStructure(mgmtInfo.systemStruBitsStr);
+            return !!(st && st.planes && st.planes.length >= 1 && st.planes[0] >= 2);
+        }
+
+        // ★Ver3.1：読取対象のカラーPQRが運ぶ「領域番号」と「そのPQR内でのプレーン番号」の対応を返す。
+        //   従来は bitIndex = regionNo - 2 という固定式で、
+        //   「第2領域以降が1枚のカラーQRに順番に載る」前提だった。
+        //   4色＋4色(0100) のように第1PQRも色を持つ構成ではこの前提が崩れるため、
+        //   systemStruBits から実際の割り当てを導く。
+        //   戻り値: [{ regionNo, bitIndex }]（regionNoは1始まりの論理QR番号）
+        //   pqrNo を渡すとそのPQRを対象にする（1=第1PQR / 2=第2PQR）。
+        //   省略時は「色プレーンを2枚以上持つ最後のPQR」＝従来の読取対象。
+        function newColorRegionPlanList(mgmtInfo, pqrNo) {
+            const M = window.QRTwinMgmt48;
+            const st = (M && mgmtInfo && mgmtInfo.systemStruBitsStr)
+                ? M.deriveStructure(mgmtInfo.systemStruBitsStr) : null;
+            if (!st || !st.planes || !st.lqrToPqr) {
+                // 構造が取れない場合は従来どおりの並びで返す
+                const legacy = [];
+                const n = (mgmtInfo && mgmtInfo.regionCount) ? mgmtInfo.regionCount : 2;
+                for (let r = 2; r <= n; r++) legacy.push({ regionNo: r, bitIndex: r - 2 });
+                return legacy;
+            }
+            let pqrIdx;
+            if (pqrNo) {
+                pqrIdx = pqrNo - 1;
+                if (pqrIdx < 0 || pqrIdx >= st.planes.length) return [];
+                if (st.planes[pqrIdx] < 2) return [];   // 色多重化していないPQRは対象外
+            } else {
+                // 色プレーンを2枚以上持つ最後のPQR（＝従来の読取対象）
+                pqrIdx = -1;
+                for (let i = st.planes.length - 1; i >= 0; i--) {
+                    if (st.planes[i] >= 2) { pqrIdx = i; break; }
+                }
+                if (pqrIdx < 0) return [];
+            }
+            const list = [];
+            let plane = 0;
+            for (let i = 0; i < st.lqrToPqr.length; i++) {
+                const a = st.lqrToPqr[i];
+                if (!a || a.pqr !== pqrIdx + 1 || a.padding || a.addon) continue;
+                list.push({ regionNo: i + 1, bitIndex: plane });
+                plane++;
+            }
+            return list;
+        }
+
+        // 指定したPQRの使用色ビットマップを返す（1=第1PQR / 2=第2PQR）
+        function newColorSpecForPqr(mgmtInfo, pqrNo) {
+            if (!mgmtInfo) return 0;
+            return (pqrNo === 1) ? (mgmtInfo.colorSpec1 || 0) : (mgmtInfo.colorSpec2 || 0);
+        }
+
+        // 色多重化しているPQRの一覧を返す（読取が処理すべき対象）
+        function newColorTargetPqrList(mgmtInfo) {
+            const M = window.QRTwinMgmt48;
+            const st = (M && mgmtInfo && mgmtInfo.systemStruBitsStr)
+                ? M.deriveStructure(mgmtInfo.systemStruBitsStr) : null;
+            if (!st || !st.planes) return [];
+            const list = [];
+            for (let i = 0; i < st.planes.length; i++) {
+                if (st.planes[i] >= 2) {
+                    list.push({
+                        pqrNo: i + 1,
+                        colorCount: st.colors[i],
+                        colorSpec: newColorSpecForPqr(mgmtInfo, i + 1),
+                        regions: newColorRegionPlanList(mgmtInfo, i + 1)
+                    });
+                }
+            }
+            return list;
+        }
+
         function getNewColorDecoder(mgmtInfo) {
             if (!mgmtInfo) return null;
+            if (newColorNeedsPqr1Separation(mgmtInfo)) {
+                // 第1PQRの色分離は未実装。誤読を防ぐためデコーダを返さない。
+                try {
+                    const s = getScanDebugStats();
+                    s.newColorUnsupported = '第1PQRも色多重化する構成（'
+                        + mgmtInfo.systemStruBitsStr + '）は読取未対応です';
+                } catch (e) { /* デバッグ記録できなくても処理は続ける */ }
+                return null;
+            }
             const M = window.QRTwinMgmt48;
             const st = (M && mgmtInfo.systemStruBitsStr) ? M.deriveStructure(mgmtInfo.systemStruBitsStr) : null;
             if (st && st.planes && st.planes.length) {
@@ -8252,12 +8362,17 @@
             const attemptCandidateDecode = (cand) => {
                 const locInfo = cand.locInfo;
                 const colorProbe = cand.colorProbe;
-                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                // ★Ver3.1：領域番号とプレーン番号の対応を構造から導く。
+                //   従来は bitIndex = regionNo - 2 の固定式で、
+                //   第1PQRも色を持つ構成では割り当てがずれていた。
+                const planList = newColorRegionPlanList(q1Data.mgmtInfo);
+                for (const plan of planList) {
+                    const regionNo = plan.regionNo;
                     if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) {
                         colorProbe.regions[String(regionNo)] = 'already_acquired';
                         continue;
                     }
-                    const bitIndex = regionNo - 2;
+                    const bitIndex = plan.bitIndex;
                     const bits = buildBitMatrixFromColorStates(cand.states, decoder.states, bitIndex);
                     let qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
                     if (!qrMatrix && cand.cells && cand.cells.length) {
