@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader24</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1154,7 +1154,8 @@
         const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
         const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
         const NEW_COLOR_DEFER_MAX_CANDIDATES = 2;           // 後回し（曖昧多）候補の消化上限
-        let newColorLocCache = null;                        // 直近で領域取得に成功した位置情報 { key, locInfo, at, missCount }
+        let newColorLocCache = {};                          // 直近で領域取得に成功した位置情報 key -> { locInfo, at, missCount }
+                                                            // ★Ver3.1：キーに対象PQRを含める（4色＋4色ではPQRごとに別位置）
         let newColorPlaneVotes = null;                      // 未取得領域のビット±1票蓄積 { dim, at, votes:{regionNo:Int16Array}, adds:{regionNo:n} }
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
@@ -1994,7 +1995,8 @@
             {
                 const tc = stats.twinCombineResult;
                 if (tc === undefined || tc === null) {
-                    lines.push('ツイン合成(段階2/3): 未実行 / 起動条件: ' + (stats.twinCombineGate || '記録なし'));
+                    lines.push('ツイン合成(段階2/3): 未実行 / 起動条件: '
+                        + (stats.twinCombineGate || '判定前に復号成功（フォールバック不要）'));
                 } else {
                     const s = stats.twinCombineStats;
                     lines.push('ツイン合成(段階2/3): ' + tc
@@ -2093,7 +2095,7 @@
                         ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
                         : '-';
                     lines.push(
-                        `  #${idx + 1} loc=${cp.locationIndex} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
@@ -3009,6 +3011,22 @@
         //   画像内位置を幾何学的に算出してクロップする。紙印刷のように Q1 と Q2 の
         //   finder pattern が干渉して jsQR の locator が失敗する場合の救済策。
         //   返り値: { sx, sy, sw, sh } または null
+        // ★Ver3.1：クロップ矩形を、指定した点群（第1QRの四隅）まで含む範囲へ広げる。
+        //   第1PQRも色多重化する構成で、1枚のクロップから両PQRを処理するために使う。
+        function expandGeoCropToIncludePoints(box, points) {
+            if (!box || !points || points.length < 3) return box;
+            if (!video || !video.videoWidth || !video.videoHeight) return box;
+            const xs = points.map(p => p.x);
+            const ys = points.map(p => p.y);
+            const pad = Math.max(box.sw, box.sh) * 0.08;
+            const x0 = Math.max(0, Math.floor(Math.min(box.sx, Math.min(...xs) - pad)));
+            const y0 = Math.max(0, Math.floor(Math.min(box.sy, Math.min(...ys) - pad)));
+            const x1 = Math.min(video.videoWidth, Math.ceil(Math.max(box.sx + box.sw, Math.max(...xs) + pad)));
+            const y1 = Math.min(video.videoHeight, Math.ceil(Math.max(box.sy + box.sh, Math.max(...ys) + pad)));
+            if (x1 - x0 <= 32 || y1 - y0 <= 32) return box;
+            return { ...box, sx: x0, sy: y0, sw: x1 - x0, sh: y1 - y0 };
+        }
+
         function estimateQ2BBoxFromQ1(firstQrPoints, versionNumber) {
             if (!firstQrPoints || firstQrPoints.length !== 4) return null;
             if (!video || !video.videoWidth || !video.videoHeight) return null;
@@ -3271,7 +3289,7 @@
                 recordJsQrInput(phaseLabel + ' newColor', imageType);
                 const t0 = nowPerf();
                 const candidateImage = { data: rgba };
-                const decoded = processNewColorQRTwin(candidateImage, w, h, q1Data, newColorScanResult, coordinateOptions);
+                const decoded = processNewColorQRTwinAllPqr(candidateImage, w, h, q1Data, newColorScanResult, coordinateOptions);
                 addPhaseElapsed(scanStage, phaseLabel + ' newColor', nowPerf() - t0, 'jsqr');
 
                 if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
@@ -3486,7 +3504,15 @@
 
             let geoQ2Box = null;
             if (profile.firstQrPoints) {
-                const q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
+                let q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
+                // ★Ver3.1：第1PQRも色多重化する構成（4色＋4色 など）では第1QRの位置も
+                //   色分離の対象になる。幾何クロップは第2QRを中心に余白30%で切るため、
+                //   第1QRの左上端が数モジュールはみ出すことがある（V3で実測約1モジュール）。
+                //   はみ出すと第1PQRを位置検出できないので、第1QRまで含む範囲へ広げる。
+                if (q2box && profile.kind === 'newcolor'
+                    && newColorNeedsPqr1Separation(profile.newColorMgmtInfo)) {
+                    q2box = expandGeoCropToIncludePoints(q2box, profile.firstQrPoints);
+                }
                 if (q2box) {
                     geoQ2Box = q2box;
                     recordGeometryCropDebug(q2box, '共通F0 幾何クロップ');
@@ -4421,7 +4447,7 @@
             const phaseLabel = 'newColor pre-password raw-capture';
             recordJsQrInput(phaseLabel, 'full');
             const t0 = nowPerf();
-            const decoded = processNewColorQRTwin(frame, frame.width, frame.height, newColorQ1Data, newColorScanResult);
+            const decoded = processNewColorQRTwinAllPqr(frame, frame.width, frame.height, newColorQ1Data, newColorScanResult);
             addPhaseElapsed(scanStage || 1, phaseLabel, nowPerf() - t0, 'jsqr');
             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
             newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
@@ -4464,7 +4490,7 @@
                 const phaseLabel = 'newColor password saved-frame';
                 recordJsQrInput(phaseLabel, 'full');
                 const t0 = nowPerf();
-                const decoded = processNewColorQRTwin(frame, frame.width, frame.height, newColorQ1Data, newColorScanResult);
+                const decoded = processNewColorQRTwinAllPqr(frame, frame.width, frame.height, newColorQ1Data, newColorScanResult);
                 addPhaseElapsed(scanStage || 3, phaseLabel, nowPerf() - t0, 'jsqr');
                 if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                 newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
@@ -5205,7 +5231,7 @@
             newColorQ1Data = null;
             newColorScanResult = createNewColorScanResult();
             pendingNewColorFrame = null;
-            newColorLocCache = null;
+            newColorLocCache = {};
             newColorPlaneVotes = null;
         }
 
@@ -6757,7 +6783,10 @@
             for (let i = 0; i < st.lqrToPqr.length; i++) {
                 const a = st.lqrToPqr[i];
                 if (!a || a.pqr !== pqrIdx + 1 || a.padding || a.addon) continue;
-                list.push({ regionNo: i + 1, bitIndex: plane });
+                // 第1LQR（＝第1PQRの第1プレーン）は白黒として読めるため、
+                // 既にQ1として取得済み。色分離の対象からは外す。
+                // ただしプレーン番号は消費するのでカウンタは進める。
+                if (i !== 0) list.push({ regionNo: i + 1, bitIndex: plane });
                 plane++;
             }
             return list;
@@ -6789,14 +6818,30 @@
             return list;
         }
 
-        function getNewColorDecoder(mgmtInfo) {
+        //   pqrNo を渡すとそのPQRのパレットでデコーダを作る。
+        //   省略時は従来どおり「色多重化している最後のPQR」を対象にする。
+        //   1回の処理で扱えるパレットは1つなので、第1PQRも色を持つ構成では
+        //   呼び出し側がPQRごとに2回呼び分ける。
+        function getNewColorDecoder(mgmtInfo, pqrNo) {
             if (!mgmtInfo) return null;
+            const M0 = window.QRTwinMgmt48;
+            if (pqrNo && M0 && mgmtInfo.systemStruBitsStr) {
+                const st0 = M0.deriveStructure(mgmtInfo.systemStruBitsStr);
+                if (!st0 || !st0.planes || st0.planes.length < pqrNo) return null;
+                const colors0 = st0.colors[pqrNo - 1];
+                const spec0 = newColorSpecForPqr(mgmtInfo, pqrNo);
+                if (colors0 === 8) return buildQuadColorDecoder();
+                if (colors0 === 4) return buildTriColorDecoder(spec0);
+                return null;
+            }
+            // pqrNo 未指定（従来の1回呼び出し）で、第1PQRも色多重化する構成の場合。
+            // この経路では第2PQRしか復号できず、第1PQR側の領域が永久に揃わないため
+            // 完了判定が待ち続けてタイムアウトになる。明示的に失敗させる。
             if (newColorNeedsPqr1Separation(mgmtInfo)) {
-                // 第1PQRの色分離は未実装。誤読を防ぐためデコーダを返さない。
                 try {
                     const s = getScanDebugStats();
                     s.newColorUnsupported = '第1PQRも色多重化する構成（'
-                        + mgmtInfo.systemStruBitsStr + '）は読取未対応です';
+                        + mgmtInfo.systemStruBitsStr + '）はPQRごとの2回呼び出しが必要です';
                 } catch (e) { /* デバッグ記録できなくても処理は続ける */ }
                 return null;
             }
@@ -6815,8 +6860,10 @@
                 if (colors === 4) return buildTriColorDecoder(spec);
                 return null;
             }
-            // 構造が取れない場合は従来の判定にフォールバック
-            if (mgmtInfo.regionCount === 3) return buildTriColorDecoder(mgmtInfo.colorSpecBits);
+            // 構造が取れない場合は従来の判定にフォールバック。
+            // 色指定は色多重化している第2PQRのものを使う（colorSpecBits は第1PQRの別名で、
+            // 白黒構成では 0x81 になり4色パレットとして使えない）。
+            if (mgmtInfo.regionCount === 3) return buildTriColorDecoder(mgmtInfo.colorSpec2 || mgmtInfo.colorSpecBits);
             if (mgmtInfo.regionCount === 4) return buildQuadColorDecoder();
             return null;
         }
@@ -7438,12 +7485,19 @@
             return !!ab[bitIndex] !== !!bb[bitIndex];
         }
 
-        function summarizeNewColorCellProbe(cells, decoder, n, regionCount) {
+        // ★Ver3.1：planList は [{regionNo, bitIndex}]（このPQRが運ぶ領域とプレーンの対応）。
+        //   従来は bitIndex = regionNo - 2 の固定式だったため、
+        //   第1PQRも色を持つ構成では領域別の曖昧セル数が誤集計され、
+        //   候補の後回し判定（neededRegionAmbiguity）まで狂っていた。
+        function summarizeNewColorCellProbe(cells, decoder, n, planList) {
             const total = Math.max(1, n * n);
             const formatSet = buildQrFormatCellSet(n);
+            const plans = (Array.isArray(planList) && planList.length)
+                ? planList
+                : [{ regionNo: 2, bitIndex: 0 }, { regionNo: 3, bitIndex: 1 }];
             const byRegion = {};
-            for (let regionNo = 2; regionNo <= regionCount; regionNo++) {
-                byRegion[String(regionNo)] = { ambiguous: 0, formatAmbiguous: 0 };
+            for (const p of plans) {
+                byRegion[String(p.regionNo)] = { ambiguous: 0, formatAmbiguous: 0 };
             }
             const confusion = new Map();
             const worst = [];
@@ -7466,10 +7520,9 @@
                 const fmt = formatSet.has(cell.r + ',' + cell.c);
                 const key = cell.state + '>' + (cell.secondState || '-');
                 confusion.set(key, (confusion.get(key) || 0) + 1);
-                for (let regionNo = 2; regionNo <= regionCount; regionNo++) {
-                    const bitIndex = regionNo - 2;
-                    if (colorStateChangesBit(decoder, cell.state, cell.secondState, bitIndex)) {
-                        const bucket = byRegion[String(regionNo)];
+                for (const p of plans) {
+                    if (colorStateChangesBit(decoder, cell.state, cell.secondState, p.bitIndex)) {
+                        const bucket = byRegion[String(p.regionNo)];
                         bucket.ambiguous++;
                         if (fmt) bucket.formatAmbiguous++;
                     }
@@ -8180,7 +8233,7 @@
                 }
             }
             if (colorProbe) {
-                colorProbe.summary = summarizeNewColorCellProbe(cells, decoder, n, colorProbe.regionCount || 3);
+                colorProbe.summary = summarizeNewColorCellProbe(cells, decoder, n, colorProbe.planList);
                 if (colorProbe.summary) {
                     const calibParts = [];
                     if (calibration) calibParts.push(calibration.calibDebug);
@@ -8199,26 +8252,44 @@
             return states;
         }
 
-        function scoreNewColorLocationForExpected(locationInfo, q1Bounds, expectedBounds) {
+        // ★Ver3.1：allowQ1Overlap を真にすると、第1QRと重なる候補も残す。
+        //   4色＋4色(0100) のように第1PQRも色多重化する構成では、
+        //   第1QRの位置にあるカラーQRこそ色分離の対象になるため。
+        //   既定（偽）では従来どおり第1QRと重なる候補を除外する。
+        function scoreNewColorLocationForExpected(locationInfo, q1Bounds, expectedBounds, allowQ1Overlap) {
             const bbox = getQrLocationBBox(locationInfo && locationInfo.location);
             if (!bbox) return { reject: false, score: 0, expectedIou: 0, q1Iou: 0 };
             const q1Iou = q1Bounds ? rectIntersectionArea(bbox, q1Bounds) / Math.max(1, bbox.width * bbox.height + q1Bounds.width * q1Bounds.height - rectIntersectionArea(bbox, q1Bounds)) : 0;
-            if (q1Iou > 0.35) return { reject: true, score: -9999, expectedIou: 0, q1Iou };
+            const bx = bbox.x + bbox.width / 2;
+            const by = bbox.y + bbox.height / 2;
             let expectedIou = 0;
             let centerScore = 0;
+            let distExpected = null;
             if (expectedBounds) {
                 const inter = rectIntersectionArea(bbox, expectedBounds);
                 expectedIou = inter / Math.max(1, bbox.width * bbox.height + expectedBounds.width * expectedBounds.height - inter);
-                const bx = bbox.x + bbox.width / 2;
-                const by = bbox.y + bbox.height / 2;
                 const ex = expectedBounds.x + expectedBounds.width / 2;
                 const ey = expectedBounds.y + expectedBounds.height / 2;
+                distExpected = Math.hypot(bx - ex, by - ey);
                 const norm = Math.max(1, Math.hypot(expectedBounds.width, expectedBounds.height));
-                centerScore = 1 - Math.min(1, Math.hypot(bx - ex, by - ey) / norm);
+                centerScore = 1 - Math.min(1, distExpected / norm);
+            }
+            if (!allowQ1Overlap && q1Bounds) {
+                // ★Ver3.1：除外したいのは「第1QRそのもの」の候補だけ。
+                //   従来は 第1QRとのIoU > 0.35 で判定していたが、8.5セルずらしのQRツインは
+                //   版数が上がるほど2つのQRの重なりが増えるため（V3:0.33 / V4:0.38 / V5:0.42 / V10:0.57）、
+                //   V4以上では本命の第2QR候補まで除外していた。
+                //   中心が「第1QRの位置」と「期待位置」のどちらに近いかで判定すれば版数に依存しない。
+                const qx = q1Bounds.x + q1Bounds.width / 2;
+                const qy = q1Bounds.y + q1Bounds.height / 2;
+                const distQ1 = Math.hypot(bx - qx, by - qy);
+                const isQ1Itself = (distExpected !== null) ? (distQ1 < distExpected) : (q1Iou > 0.35);
+                if (isQ1Itself) return { reject: true, score: -9999, expectedIou: 0, q1Iou };
             }
             return {
                 reject: false,
-                score: expectedIou * 10 + centerScore - q1Iou * 6,
+                // 第1PQRを狙う回は「第1QRと重なる＝本命」なので重なりペナルティを課さない
+                score: expectedIou * 10 + centerScore - (allowQ1Overlap ? 0 : q1Iou * 6),
                 expectedIou,
                 q1Iou
             };
@@ -8226,14 +8297,23 @@
 
         function processNewColorQRTwin(imageData, width, height, q1Data, existingResult = null, coordinateOptions = null) {
             if (!q1Data || !q1Data.mgmtInfo) return null;
-            const decoder = getNewColorDecoder(q1Data.mgmtInfo);
+            // ★Ver3.1：対象PQR。未指定なら従来どおり「色多重化している最後のPQR」を扱う。
+            //   第1PQRも色を持つ構成（4色＋4色）では、色分類のパレットが異なるため
+            //   呼び出し側がPQRごとに2回呼び分ける。
+            const targetPqrNo = (coordinateOptions && coordinateOptions.targetPqrNo) || null;
+            const decoder = getNewColorDecoder(q1Data.mgmtInfo, targetPqrNo);
             if (!decoder) return null;
+            // このPQRが運ぶ「領域番号 ↔ プレーン番号」の対応（第1LQRは白黒読取済みなので含まれない）
+            const targetPlanList = newColorRegionPlanList(q1Data.mgmtInfo, targetPqrNo);
+            if (!targetPlanList.length) return null;
+            // 第1PQRを狙う回か（4色＋4色のときだけ true になる）
+            const aimPqr1 = (targetPqrNo === 1);
             // Stage3の反復フレームでは1回の処理に時間予算を設ける。
             // 悪い（ピンボケ等）フレームへ候補総当たりで数百ms〜秒単位を注ぎ込むより、
             // 早く次のフレーム（フォーカスが合った瞬間）を取り込むほうが確定が速い（ログ実測）。
             const budgetT0 = nowPerf();
             const budgetMs = (scanStage === 3 && !appMask) ? NEW_COLOR_STAGE3_BUDGET_MS : Infinity;
-            const locCacheKey = width + 'x' + height;
+            const locCacheKey = width + 'x' + height + '#p' + (targetPqrNo || 0);
             const localToVideoPoint = coordinateOptions && typeof coordinateOptions.localToVideoPoint === 'function'
                 ? coordinateOptions.localToVideoPoint
                 : null;
@@ -8266,6 +8346,9 @@
             const q1BoundsVideo = getQrLocationBBox(q1Data.location);
             const shiftedBounds = computeShiftedNewColorBounds(q1LocalData);
             const shiftedBoundsVideo = computeShiftedNewColorBounds(q1Data);
+            // 対象PQRの期待位置：第1PQRなら第1QRと同じ位置、第2PQRなら8.5セルずらした位置
+            const expectBoundsLocal = aimPqr1 ? q1Bounds : shiftedBounds;
+            const expectBoundsVideo = aimPqr1 ? (q1BoundsVideo || q1Bounds) : (shiftedBoundsVideo || shiftedBounds);
             const locateProbeCollector = [];
             const locateOptions = {
                 inversionAttempts: 'dontInvert',
@@ -8278,17 +8361,18 @@
                 _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
                 _probeCropRect: { sx: 0, sy: 0, sw: width, sh: height },
                 _probeQ1Rect: q1BoundsVideo || q1Bounds,
-                _probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds
+                _probeExpectedQ2Rect: expectBoundsVideo
             };
             const locateImageType = (video && width === video.videoWidth && height === video.videoHeight) ? 'full' : 'crop';
             // ★ 実績位置キャッシュが新しいうちは locate（30〜60ms）と全候補分類を省略し、
             //   キャッシュ候補1件の分類→復号だけで回す（フレーム回転率を上げ、良フレーム到達を早める）。
             //   キャッシュ候補で2フレーム連続新規取得ゼロなら通常 locate に戻す（位置ズレ・別候補対応）。
-            const cacheFresh = !!(newColorLocCache && newColorLocCache.key === locCacheKey && Date.now() - newColorLocCache.at < 4000);
-            const skipLocate = cacheFresh && scanStage === 3 && !appMask && (newColorLocCache.missCount || 0) < 2;
+            const locCacheEntry = (newColorLocCache && newColorLocCache[locCacheKey]) || null;
+            const cacheFresh = !!(locCacheEntry && Date.now() - locCacheEntry.at < 4000);
+            const skipLocate = cacheFresh && scanStage === 3 && !appMask && (locCacheEntry.missCount || 0) < 2;
             let acquiredBefore = 0;
-            for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
-                if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) acquiredBefore++;
+            for (const plan of targetPlanList) {
+                if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, plan.regionNo)) acquiredBefore++;
             }
             let colorLocations = [];
             if (skipLocate) {
@@ -8312,8 +8396,11 @@
                     imageType: locateImageType
                 });
 
+                // ★Ver3.1：対象PQRに応じて「期待位置」と「第1QRとの重なりの扱い」を切り替える。
+                //   第2PQRを狙う既定時は従来どおり、第1QRと重なる候補を除外する。
+                //   第1PQRを狙う場合は、第1QRの位置にある候補こそ本命なので除外しない。
                 colorLocations = colorLocations
-                    .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, shiftedBounds) }))
+                    .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, expectBoundsLocal, aimPqr1) }))
                     .filter(item => item.loc && !item.rank.reject)
                     .sort((a, b) => {
                         if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
@@ -8328,7 +8415,7 @@
             // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
             if (cacheFresh) {
-                colorLocations.unshift(newColorLocCache.locInfo);
+                colorLocations.unshift(locCacheEntry.locInfo);
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
@@ -8342,7 +8429,7 @@
                     probeBin: 'matrix',
                     probeScale: (locInfo && locInfo.dimension ? locInfo.dimension : '?') + 'x' + (locInfo && locInfo.dimension ? locInfo.dimension : '?'),
                     probeQ1Rect: q1BoundsVideo || q1Bounds,
-                    probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds,
+                    probeExpectedQ2Rect: expectBoundsVideo,
                     _localToVideoPoint: localToVideoPoint,
                     _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
                     _probeCropRect: { sx: 0, sy: 0, sw: width, sh: height },
@@ -8358,6 +8445,10 @@
                 };
             };
 
+            // このPQRが運ぶ領域がすべて取れたか（4色＋4色では他方のPQRの領域を待たずに打ち切る）
+            const targetRegionsDone = () =>
+                targetPlanList.every(p => hasNewColorRegionAcquired(result, q1Data.mgmtInfo, p.regionNo));
+
             // ─ 候補1件分の復号試行（失敗時は曖昧セル反転リトライ付き）─
             const attemptCandidateDecode = (cand) => {
                 const locInfo = cand.locInfo;
@@ -8365,8 +8456,7 @@
                 // ★Ver3.1：領域番号とプレーン番号の対応を構造から導く。
                 //   従来は bitIndex = regionNo - 2 の固定式で、
                 //   第1PQRも色を持つ構成では割り当てがずれていた。
-                const planList = newColorRegionPlanList(q1Data.mgmtInfo);
-                for (const plan of planList) {
+                for (const plan of targetPlanList) {
                     const regionNo = plan.regionNo;
                     if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) {
                         colorProbe.regions[String(regionNo)] = 'already_acquired';
@@ -8444,10 +8534,14 @@
                         && qrMatrix._crossRegionQrNo !== regionNo - 1) {
                         storeRegionNo = qrMatrix._crossRegionQrNo + 1;
                         if (storeRegionNo < 2) {
-                            // ビット行列がQ1(qrNo=0)として復号できた＝この候補格子は第1QR自身。
-                            // 色シンボルではないため残り領域の試行も無駄（紙ログ実測: この繰り返しが
-                            // 20秒中 数千回の decode_success→棄却 を生み時間予算を食い潰していた）。
+                            // ビット行列がQ1(qrNo=0)として復号できた。
                             colorProbe.regions[String(regionNo)] = 'q1_shadow';
+                            // ★Ver3.1：第1PQRを狙う回（4色＋4色）は候補格子が第1QR自身で正常。
+                            //   第1プレーンを拾ってしまっただけなので、残りのプレーンは試す。
+                            if (aimPqr1) continue;
+                            // 第2PQRを狙う回では、この候補は色シンボルではないので残り領域の試行も無駄
+                            // （実測ログ: この繰り返しが20秒中 数千回の decode_success→棄却 を生み
+                            //   時間予算を食い潰していた）。
                             break;
                         }
                         if (storeRegionNo > q1Data.mgmtInfo.regionCount
@@ -8460,7 +8554,7 @@
                     qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
                     storeNewColorRegionDecode(result, storeRegionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
                     // 実績のある位置情報をキャッシュ（同一クロップの次フレームで分類1回目から良候補を使う）
-                    newColorLocCache = { key: locCacheKey, locInfo, at: Date.now(), missCount: 0 };
+                    newColorLocCache[locCacheKey] = { locInfo, at: Date.now(), missCount: 0 };
                     const successTag = qrMatrix._planeVariant ? 'decode_success(' + qrMatrix._planeVariant + ')' : 'decode_success';
                     if (storeRegionNo !== regionNo) {
                         colorProbe.regions[String(storeRegionNo)] = 'cross_success';
@@ -8474,7 +8568,7 @@
                     if (!failed) colorProbe.summary.worstCellsTop = [];
                     recordNewColorColorProbe(colorProbe);
                 }
-                return isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
+                return targetRegionsDone() || isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
             };
 
             // 未取得領域の平均曖昧セル数（候補の見込み品質。小さいほど復号成功しやすい）
@@ -8482,7 +8576,8 @@
                 if (!colorProbe.summary || !colorProbe.summary.byRegion) return Infinity;
                 let sum = 0;
                 let counted = 0;
-                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                for (const plan of targetPlanList) {
+                    const regionNo = plan.regionNo;
                     if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) continue;
                     const bucket = colorProbe.summary.byRegion[String(regionNo)];
                     if (!bucket) return Infinity;
@@ -8496,7 +8591,7 @@
             //   曖昧の多い候補（従来は総当たりでRS失敗の山を作っていた）は後回しにする。─
             // ─ フェーズB: 残候補を曖昧セル数の昇順で復号。─
             const deferred = [];
-            let stageComplete = isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
+            let stageComplete = targetRegionsDone() || isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
             for (let locIdx = 0; locIdx < colorLocations.length && !stageComplete; locIdx++) {
                 if (locIdx > 0 && nowPerf() - budgetT0 > budgetMs) {
                     // 予算打ち切り回数をレポートに残す（jsQR crop回数として計上される）
@@ -8516,6 +8611,8 @@
                     dimension: locInfo && locInfo.dimension,
                     moduleSize: locInfo && locInfo.moduleSize,
                     regionCount: q1Data.mgmtInfo.regionCount,
+                    targetPqrNo: targetPqrNo || null,
+                    planList: targetPlanList,
                     regions: {}
                 };
                 const supersampled = createNewColorSupersampledInput(imageData.data, width, height, locInfo);
@@ -8568,15 +8665,47 @@
             }
 
             // locate省略フレームの成否を記録（連続失敗で通常locateへ復帰させる）
-            if (skipLocate && newColorLocCache) {
+            const cacheSlot = newColorLocCache && newColorLocCache[locCacheKey];
+            if (skipLocate && cacheSlot) {
                 let acquiredNow = 0;
-                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
-                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) acquiredNow++;
+                for (const plan of targetPlanList) {
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, plan.regionNo)) acquiredNow++;
                 }
-                newColorLocCache.missCount = acquiredNow > acquiredBefore ? 0 : (newColorLocCache.missCount || 0) + 1;
+                cacheSlot.missCount = acquiredNow > acquiredBefore ? 0 : (cacheSlot.missCount || 0) + 1;
             }
 
             return result;
+        }
+
+        // ★Ver3.1：色多重化しているPQRごとに processNewColorQRTwin を呼び分ける。
+        //   1回の処理では色パレット（較正・判別軸）を1つしか持てないため、
+        //   4色＋4色(0100) のように両PQRが色を持つ構成では2回に分けて処理する必要がある。
+        //   色多重化PQRが1枚だけの従来構成（0000/0001/0010）は、
+        //   targetPqrNo を渡さず従来と完全に同じ経路を通す。
+        function processNewColorQRTwinAllPqr(imageData, width, height, q1Data, existingResult = null, coordinateOptions = null) {
+            const mgmt = q1Data && q1Data.mgmtInfo;
+            if (!mgmt) return null;
+            const targets = newColorTargetPqrList(mgmt);
+            if (targets.length <= 1) {
+                return processNewColorQRTwin(imageData, width, height, q1Data, existingResult, coordinateOptions);
+            }
+            let acc = existingResult;
+            let out = null;
+            for (const t of targets) {
+                if (!t.regions || !t.regions.length) continue;
+                // このPQRの領域が既に揃っているなら locate ごと省略する
+                if (acc && t.regions.every(p => hasNewColorRegionAcquired(acc, mgmt, p.regionNo))) continue;
+                const opts = { ...(coordinateOptions || {}), targetPqrNo: t.pqrNo };
+                const r = processNewColorQRTwin(imageData, width, height, q1Data, acc, opts);
+                if (r) {
+                    // 戻り値は existingResult を引き継いで作られるため、
+                    // 次のPQRへそのまま渡せば両PQRの取得結果が積み上がる
+                    acc = r;
+                    out = r;
+                }
+                if (acc && (isNewColorAcquiredComplete(acc, mgmt) || isNewColorStageComplete(acc, mgmt))) break;
+            }
+            return out;
         }
 
         function countNewColorStageResult(result, mgmtInfo) {
@@ -9258,7 +9387,7 @@
                             zxingCtx.drawImage(video, 0, 0, vw, vh);
                             const fullData = zxingCtx.getImageData(0, 0, vw, vh);
 
-                            const decoded = processNewColorQRTwin(fullData, vw, vh, newColorQ1Data, newColorScanResult);
+                            const decoded = processNewColorQRTwinAllPqr(fullData, vw, vh, newColorQ1Data, newColorScanResult);
                             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                             newColorScanResult.attempts++;
 
