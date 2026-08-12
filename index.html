@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader25</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -349,6 +349,15 @@
             <div id="newColorRes4Card" class="qr-data-card" style="border-color: #CE93D8; display:none;">
                 <label id="newColorRes4Label" style="color:#CE93D8;">第4QR データ</label>
                 <div class="text" id="newColorRes4">-</div>
+            </div>
+            <!-- ★Ver3.1：5領域(4色＋8色)・6領域(8色＋8色)用 -->
+            <div id="newColorRes5Card" class="qr-data-card" style="border-color: #FF8A65; display:none;">
+                <label id="newColorRes5Label" style="color:#FF8A65;">第5QR データ</label>
+                <div class="text" id="newColorRes5">-</div>
+            </div>
+            <div id="newColorRes6Card" class="qr-data-card" style="border-color: #90A4AE; display:none;">
+                <label id="newColorRes6Label" style="color:#90A4AE;">第6QR データ</label>
+                <div class="text" id="newColorRes6">-</div>
             </div>
             <div id="newColorCombinedCard" class="qr-data-card" style="border-color: #4CAF50; display:none;">
                 <label id="newColorCombinedLabel" style="color:#4CAF50;">結合データ</label>
@@ -1136,6 +1145,8 @@
         const COLOR_DETECT_REFRESH_EVERY = 2;
         const COLOR_BBOX_PADDING = 64;
         const NEW_COLOR_SHIFT_MODULES = 8.5;
+        // ★Ver3.1：扱える論理QR（領域）の最大数。8色＋8色(0110) の6領域が上限。
+        const NEW_COLOR_MAX_REGION = 6;
         const NEW_COLOR_AMBIGUOUS_MARGIN = 35;
         const NEW_COLOR_AMBIGUOUS_VOTE_MARGIN = 1;
         const NEW_COLOR_WORST_CELL_LIMIT = 20;
@@ -3208,9 +3219,7 @@
                 isProcessing = false;
                 showNewColorResult(
                     q1Data.text,
-                    result.qr2,
-                    result.qr3,
-                    result.qr4,
+                    collectNewColorRegionTexts(result),
                     q1Data.mgmtInfo,
                     { ...q1Data, newColorResult: result }
                 );
@@ -4499,15 +4508,15 @@
                 if (mgmtInfo && mgmtInfo.qrNo !== regionNo - 1) return false;
                 newColorScanResult[key] = decodedText;
                 newColorScanResult[key + 'Codewords'] = raw.correctedCodewords || raw.codewords || null;
-                if (regionNo === 2 && !newColorScanResult._q2Seed) newColorScanResult._q2Seed = raw;
-                if (regionNo === 3 && !newColorScanResult._q3Seed) newColorScanResult._q3Seed = raw;
-                if (regionNo === 4 && !newColorScanResult._q4Seed) newColorScanResult._q4Seed = raw;
+                const seedKey = '_q' + regionNo + 'Seed';
+                if (!newColorScanResult[seedKey]) newColorScanResult[seedKey] = raw;
                 return true;
             };
 
-            if (isNewColorRegionEncrypted(newColorQ1Data.mgmtInfo, 2)) resumeRawRegion(2);
-            if (isNewColorRegionEncrypted(newColorQ1Data.mgmtInfo, 3)) resumeRawRegion(3);
-            if (isNewColorRegionEncrypted(newColorQ1Data.mgmtInfo, 4)) resumeRawRegion(4);
+            // ★Ver3.1：暗号化されている領域を領域数ぶん復号する（従来は2〜4の直書き）
+            for (let n = 2; n <= (newColorQ1Data.mgmtInfo.regionCount || 2); n++) {
+                if (isNewColorRegionEncrypted(newColorQ1Data.mgmtInfo, n)) resumeRawRegion(n);
+            }
 
             const frame = pendingNewColorFrame || capturePendingNewColorFrame();
             if (!frame) return false;
@@ -4539,9 +4548,7 @@
             pendingNewColorFrame = null;
             showNewColorResult(
                 newColorQ1Data.text,
-                newColorScanResult.qr2,
-                newColorScanResult.qr3,
-                newColorScanResult.qr4,
+                collectNewColorRegionTexts(newColorScanResult),
                 newColorQ1Data.mgmtInfo,
                 { ...newColorQ1Data, newColorResult: newColorScanResult }
             );
@@ -7384,7 +7391,9 @@
             //   実際の qrNo を添えて返し、呼び出し側で正しい領域スロットへ格納する。
             if (jsQrOptions && jsQrOptions.acceptCrossRegion && qr.data && !qr.isRaw) {
                 const actualQrNo = getQrNumber(qr);
-                if (actualQrNo !== null && actualQrNo >= 1 && actualQrNo <= 3) {
+                // ★Ver3.1：上限は最大領域数から決める（従来は3＝4領域までの直書き）。
+                //   実際に格納できるかは呼び出し側が regionCount で再確認する。
+                if (actualQrNo !== null && actualQrNo >= 1 && actualQrNo <= NEW_COLOR_MAX_REGION - 1) {
                     recordAcceptedNewColorQr(qr);
                     qr._crossRegionQrNo = actualQrNo;
                     return qr;
@@ -7465,23 +7474,21 @@
         function storeNewColorRegionDecode(result, regionNo, qr, source = '', mgmtInfo = null) {
             if (!result || !qr) return false;
             const key = 'qr' + regionNo;
+            // ★Ver3.1：シード保持は領域番号から決める（従来は領域2〜4の直書き）
+            const seedKey = '_q' + regionNo + 'Seed';
             const encryptedBeforePassword = isNewColorRegionEncrypted(mgmtInfo, regionNo) && !appMask;
             if (isRawNewColorAppEncCandidate(qr)) {
                 const raw = buildNewColorRawCandidate(qr, regionNo, source);
                 if (!raw) return false;
                 if (!result[key + 'Raw']) result[key + 'Raw'] = raw;
-                if (regionNo === 2 && !result._q2Seed) result._q2Seed = qr;
-                if (regionNo === 3 && !result._q3Seed) result._q3Seed = qr;
-                if (regionNo === 4 && !result._q4Seed) result._q4Seed = qr;
+                if (!result[seedKey]) result[seedKey] = qr;
                 return true;
             }
             if (!qr.data || qr.isRaw) return false;
             if (encryptedBeforePassword) return false;
             if (!result[key]) result[key] = qr.data;
             if (!result[key + 'Codewords']) result[key + 'Codewords'] = qr.codewords || null;
-            if (regionNo === 2 && !result._q2Seed) result._q2Seed = qr;
-            if (regionNo === 3 && !result._q3Seed) result._q3Seed = qr;
-            if (regionNo === 4 && !result._q4Seed) result._q4Seed = qr;
+            if (!result[seedKey]) result[seedKey] = qr;
             return true;
         }
 
@@ -7697,8 +7704,26 @@
             };
         }
 
+        // ★Ver3.1：このデコーダ（=1つのPQRのパレット）が持つビットプレーン数。
+        //   2色→1 / 4色→2 / 8色→3。
+        function newColorDecoderPlaneCount(decoder) {
+            let n = 0;
+            if (decoder && decoder.candidates) {
+                for (const name of decoder.candidates) {
+                    const b = decoder.states ? decoder.states[name] : null;
+                    if (b && b.length > n) n = b.length;
+                }
+            }
+            return n;
+        }
+
         function getNewColorAnchorNames(decoder, regionCount) {
-            const bitCount = Math.max(1, (regionCount || 3) - 1);
+            // ★Ver3.1：プレーン数はデコーダから取る。
+            //   従来は regionCount-1 としていたが、これは「1枚のカラーQRが第2領域以降を
+            //   すべて運ぶ」構成でしか成り立たない。4色＋4色(0100) は regionCount=4 でも
+            //   1つのPQRのプレーンは2枚しかなく、bits[2] が undefined になるため
+            //   暗アンカー（全プレーン暗＝黒）が見つからず、適応色較正が丸ごと無効化されていた。
+            const bitCount = newColorDecoderPlaneCount(decoder) || Math.max(1, (regionCount || 3) - 1);
             let darkName = null;
             let lightName = null;
             for (const name of decoder.candidates) {
@@ -7829,7 +7854,11 @@
             //   ディスプレイ前提の理想色から系統的にズレ、固定プロファイル分類による
             //   高確信シードが全滅→理想色写像のまま→「自信満々の誤分類」になる
             //   （紙タイムアウトのログ実測）。パレットが読めればそれを絶対シードに使う。
-            const palette = regionCount === 4 ? sampleNewColorPaletteCentroids(cellRgb, hasSample, n) : null;
+            // ★Ver3.1：パレットは8色PQR（3プレーン）にだけ埋め込まれる。
+            //   従来は regionCount===4 で判定していたが、これは白黒＋8色(0010) 専用の条件で、
+            //   4色＋4色(0100) を誤って含み、8色＋8色(0110) を取りこぼす。
+            const palette = (newColorDecoderPlaneCount(decoder) === 3)
+                ? sampleNewColorPaletteCentroids(cellRgb, hasSample, n) : null;
 
             // 中間色シード: 従来分類の高確信セルの実測メディアン（パレット取得時は不要）
             const seedBuckets = new Map();
@@ -7989,7 +8018,7 @@
                 calibDebug: candidates.map(name =>
                     name.slice(0, 3) + ':' + centroids[name].map(v => Math.round(v)).join('/')
                 ).join(' ') + ` ancDk=${darkAnchor.count} ancLt=${lightAnchor.count} ancDist=${Math.round(anchorDist)}`
-                    + (palette ? ' pal=1' : (regionCount === 4 ? ' pal=0(' + (newColorPaletteLastReason || '-') + ')' : ''))
+                    + (palette ? ' pal=1' : (newColorDecoderPlaneCount(decoder) === 3 ? ' pal=0(' + (newColorPaletteLastReason || '-') + ')' : ''))
             };
         }
 
@@ -8353,14 +8382,24 @@
             const q1LocalData = videoToLocalPoint ? transformQrDataLocation(q1Data, videoToLocalPoint) : q1Data;
             const toVideoQr = (qr) => localToVideoPoint ? mapQrResultLocation(qr, localToVideoPoint) : qr;
             const toLocalQr = (qr) => videoToLocalPoint ? mapQrResultLocation(qr, videoToLocalPoint) : qr;
-            const q2DecodeOptions = getNewColorRegionDecodeOptions(q1Data.mgmtInfo, 2);
-            const q3DecodeOptions = getNewColorRegionDecodeOptions(q1Data.mgmtInfo, 3);
-            const q4DecodeOptions = getNewColorRegionDecodeOptions(q1Data.mgmtInfo, 4);
+            // ★Ver3.1：領域ごとの復号オプションを領域数ぶん用意する（従来は2〜4の直書き）
+            const regionBaseDecodeOptions = {};
+            for (let n = 2; n <= (q1Data.mgmtInfo.regionCount || 2); n++) {
+                regionBaseDecodeOptions[n] = getNewColorRegionDecodeOptions(q1Data.mgmtInfo, n);
+            }
 
             const result = {
                 qr2: existingResult && existingResult.qr2 ? existingResult.qr2 : null,
                 qr3: existingResult && existingResult.qr3 ? existingResult.qr3 : null,
                 qr4: existingResult && existingResult.qr4 ? existingResult.qr4 : null,
+                qr5: existingResult && existingResult.qr5 ? existingResult.qr5 : null,
+                qr6: existingResult && existingResult.qr6 ? existingResult.qr6 : null,
+                qr5Codewords: existingResult && existingResult.qr5Codewords ? existingResult.qr5Codewords : null,
+                qr6Codewords: existingResult && existingResult.qr6Codewords ? existingResult.qr6Codewords : null,
+                qr5Raw: existingResult && existingResult.qr5Raw ? existingResult.qr5Raw : null,
+                qr6Raw: existingResult && existingResult.qr6Raw ? existingResult.qr6Raw : null,
+                _q5Seed: existingResult && existingResult._q5Seed ? existingResult._q5Seed : null,
+                _q6Seed: existingResult && existingResult._q6Seed ? existingResult._q6Seed : null,
                 qr2Codewords: existingResult && existingResult.qr2Codewords ? existingResult.qr2Codewords : null,
                 qr3Codewords: existingResult && existingResult.qr3Codewords ? existingResult.qr3Codewords : null,
                 qr4Codewords: existingResult && existingResult.qr4Codewords ? existingResult.qr4Codewords : null,
@@ -8454,7 +8493,7 @@
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
-                const baseOptions = regionNo === 2 ? q2DecodeOptions : (regionNo === 3 ? q3DecodeOptions : q4DecodeOptions);
+                const baseOptions = regionBaseDecodeOptions[regionNo] || null;
                 const loc = locInfo && locInfo.location;
                 return {
                     ...(baseOptions || {}),
@@ -8749,20 +8788,21 @@
             return out;
         }
 
+        // ★Ver3.1：領域数で回す（従来は領域4までの直書きで、5/6領域を数えられなかった）
         function countNewColorStageResult(result, mgmtInfo) {
             if (!result || !mgmtInfo) return 1;
-            let count = 1;
-            if (hasNewColorRegionAcquired(result, mgmtInfo, 2)) count++;
-            if (hasNewColorRegionAcquired(result, mgmtInfo, 3)) count++;
-            if (mgmtInfo.regionCount === 4 && hasNewColorRegionAcquired(result, mgmtInfo, 4)) count++;
+            let count = 1;   // 第1領域は第1QRとして取得済み
+            for (let n = 2; n <= mgmtInfo.regionCount; n++) {
+                if (hasNewColorRegionAcquired(result, mgmtInfo, n)) count++;
+            }
             return count;
         }
 
         function isNewColorStageComplete(result, mgmtInfo) {
             if (!result || !mgmtInfo) return false;
-            if (!hasNewColorRegionDecodedForDisplay(result, mgmtInfo, 2)) return false;
-            if (!hasNewColorRegionDecodedForDisplay(result, mgmtInfo, 3)) return false;
-            if (mgmtInfo.regionCount === 4 && !hasNewColorRegionDecodedForDisplay(result, mgmtInfo, 4)) return false;
+            for (let n = 2; n <= mgmtInfo.regionCount; n++) {
+                if (!hasNewColorRegionDecodedForDisplay(result, mgmtInfo, n)) return false;
+            }
             return true;
         }
 
@@ -8867,43 +8907,38 @@
         }
 
         function createNewColorScanResult() {
-            return {
-                qr2: null,
-                qr3: null,
-                qr4: null,
-                qr2Codewords: null,
-                qr3Codewords: null,
-                qr4Codewords: null,
-                qr2Raw: null,
-                qr3Raw: null,
-                qr4Raw: null,
-                attempts: 0,
-                _q2Seed: null,
-                _q3Seed: null,
-                _q4Seed: null
-            };
+            // ★Ver3.1：領域数は構造で決まる（最大6領域＝8色＋8色）。
+            //   従来は qr2〜qr4 を直書きしていたため4領域までしか扱えなかった。
+            const r = { attempts: 0 };
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) {
+                r['qr' + n] = null;
+                r['qr' + n + 'Codewords'] = null;
+                r['qr' + n + 'Raw'] = null;
+                r['_q' + n + 'Seed'] = null;
+            }
+            return r;
+        }
+
+        // ★Ver3.1：結果オブジェクトから領域テキストの配列を作る（添字＝領域番号）
+        function collectNewColorRegionTexts(result) {
+            const out = [];
+            if (!result) return out;
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) out[n] = result['qr' + n] || null;
+            return out;
         }
 
         function mergeNewColorScanResult(target, decoded) {
             if (!target || !decoded) return target;
-            if (!target.qr2 && decoded.qr2) {
-                target.qr2 = decoded.qr2;
-                target.qr2Codewords = decoded.qr2Codewords || null;
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) {
+                const k = 'qr' + n;
+                if (!target[k] && decoded[k]) {
+                    target[k] = decoded[k];
+                    target[k + 'Codewords'] = decoded[k + 'Codewords'] || null;
+                }
+                if (!target[k + 'Raw'] && decoded[k + 'Raw']) target[k + 'Raw'] = decoded[k + 'Raw'];
+                const s = '_q' + n + 'Seed';
+                if (!target[s] && decoded[s]) target[s] = decoded[s];
             }
-            if (!target.qr3 && decoded.qr3) {
-                target.qr3 = decoded.qr3;
-                target.qr3Codewords = decoded.qr3Codewords || null;
-            }
-            if (!target.qr4 && decoded.qr4) {
-                target.qr4 = decoded.qr4;
-                target.qr4Codewords = decoded.qr4Codewords || null;
-            }
-            if (!target.qr2Raw && decoded.qr2Raw) target.qr2Raw = decoded.qr2Raw;
-            if (!target.qr3Raw && decoded.qr3Raw) target.qr3Raw = decoded.qr3Raw;
-            if (!target.qr4Raw && decoded.qr4Raw) target.qr4Raw = decoded.qr4Raw;
-            if (!target._q2Seed && decoded._q2Seed) target._q2Seed = decoded._q2Seed;
-            if (!target._q3Seed && decoded._q3Seed) target._q3Seed = decoded._q3Seed;
-            if (!target._q4Seed && decoded._q4Seed) target._q4Seed = decoded._q4Seed;
             return target;
         }
 
@@ -8956,8 +8991,10 @@
                 return regionNo >= 2 && regionNo <= mgmtInfo.regionCount;
             }
             if (mgmtInfo.dataCompBits === 3) {
-                if (mgmtInfo.regionCount === 3) return regionNo === 2;
-                if (mgmtInfo.regionCount === 4) return regionNo === 2 || regionNo === 3;
+                // ★Ver3.1：ケース4（暗号化＋電子署名）は役割で決まる。
+                //   役割B＝領域2〜N-1 が暗号、役割C＝領域N が署名（平文）。
+                //   3領域なら領域2、4領域なら領域2・3 が暗号 ＝ 従来の直書きと同じ結果。
+                return regionNo >= 2 && regionNo <= mgmtInfo.regionCount - 1;
             }
             return false;
         }
@@ -9007,7 +9044,8 @@
 
         function getNewColorSignatureRegionNo(mgmtInfo) {
             if (!mgmtInfo || mgmtInfo.dataCompBits !== 3) return null;
-            return mgmtInfo.regionCount === 4 ? 4 : 3;
+            // ★Ver3.1：署名は役割C＝最終領域。3領域→3 / 4領域→4 / 5領域→5 / 6領域→6
+            return mgmtInfo.regionCount || null;
         }
 
         function hasRequiredNewColorPasswordCandidates(result, mgmtInfo) {
@@ -9099,7 +9137,10 @@
         }
 
         // ★ 新カラー符号化モード結果画面表示
-        function showNewColorResult(q1Text, q2Text, q3Text, q4Text, mgmtInfo, q1Meta = null) {
+        // ★Ver3.1：領域テキストは配列で受ける（regionTexts[n] = 第n領域のテキスト）。
+        //   従来は q2/q3/q4 の3引数固定で、5領域(4色＋8色)・6領域(8色＋8色)を表示できなかった。
+        function showNewColorResult(q1Text, regionTexts, mgmtInfo, q1Meta = null) {
+            const txt = (n) => (regionTexts && regionTexts[n]) ? regionTexts[n] : '';
             recordReadCountIfNeeded(q1Meta);
             if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
             isScanning = false;
@@ -9130,9 +9171,11 @@
             infoEl.innerText = regionCount + '領域 / データ構成: ' + (compLabels[dataComp] || '不明');
 
             const card1 = document.getElementById('newColorRes1Card');
-            const card2 = document.getElementById('newColorRes2Card');
-            const card3 = document.getElementById('newColorRes3Card');
-            const card4 = document.getElementById('newColorRes4Card');
+            // ★Ver3.1：領域カードは領域数ぶん扱う（第2〜第6領域）
+            const regionCard = {};
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) {
+                regionCard[n] = document.getElementById('newColorRes' + n + 'Card');
+            }
             const combinedCard = document.getElementById('newColorCombinedCard');
             const verifyCard = document.getElementById('newColorVerifyCard');
             const verifyText = document.getElementById('newColorVerifyText');
@@ -9143,50 +9186,61 @@
             let verifyInfo = null;
             const qRegionMeta = (q1Meta && q1Meta.newColorResult) ? q1Meta.newColorResult : newColorScanResult;
             const q1Codewords = q1Meta && q1Meta.codewords ? q1Meta.codewords : null;
-            const q2Codewords = getNewColorSignatureCodewordsForRegion(qRegionMeta, 2);
-            const q3Codewords = getNewColorSignatureCodewordsForRegion(qRegionMeta, 3);
-            const triSignatureCodewords = (q1Codewords && q2Codewords) ? [q1Codewords, q2Codewords] : null;
-            const quadSignatureCodewords = (q1Codewords && q2Codewords && q3Codewords) ? [q1Codewords, q2Codewords, q3Codewords] : null;
 
+            // 存在する領域カードだけ出す（第4以降は既定で非表示）
             card1.style.display = '';
-            card2.style.display = '';
-            card3.style.display = '';
-            card4.style.display = regionCount === 4 ? '' : 'none';
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) {
+                if (regionCard[n]) regionCard[n].style.display = (n <= regionCount) ? '' : 'none';
+            }
             combinedCard.style.display = 'none';
             verifyCard.style.display = 'none';
 
+            const hideRegionCards = (from, to) => {
+                for (let n = from; n <= to; n++) {
+                    if (regionCard[n]) regionCard[n].style.display = 'none';
+                }
+            };
+            const joinRegions = (from, to) => {
+                let s = '';
+                for (let n = from; n <= to; n++) s += txt(n);
+                return s;
+            };
+            const labelRegions = (from, to) => {
+                const names = [];
+                for (let n = from; n <= to; n++) names.push('第' + n + 'QR');
+                return names.join('+') + ' データ（結合）';
+            };
+
             if (dataComp === 1) {
+                // ケース2：全領域が1本の連続データ
                 combinedLabel = '連続データ（結合）';
-                combinedText = (q1Text || '') + (q2Text || '') + (q3Text || '') + (regionCount === 4 ? (q4Text || '') : '');
+                combinedText = (q1Text || '') + joinRegions(2, regionCount);
                 card1.style.display = 'none';
-                card2.style.display = 'none';
-                card3.style.display = 'none';
-                card4.style.display = 'none';
+                hideRegionCards(2, regionCount);
             } else if (dataComp === 2) {
-                if (regionCount === 3) {
-                    combinedLabel = '第2QR+第3QR データ（結合）';
-                    combinedText = (q2Text || '') + (q3Text || '');
-                    card2.style.display = 'none';
-                    card3.style.display = 'none';
-                } else {
-                    combinedLabel = '第2QR+第3QR+第4QR データ（結合）';
-                    combinedText = (q2Text || '') + (q3Text || '') + (q4Text || '');
-                    card2.style.display = 'none';
-                    card3.style.display = 'none';
-                    card4.style.display = 'none';
-                }
+                // ケース3：役割B＋C（第2〜第N領域）がすべて暗号 → まとめて表示
+                combinedLabel = labelRegions(2, regionCount);
+                combinedText = joinRegions(2, regionCount);
+                hideRegionCards(2, regionCount);
             } else if (dataComp === 3) {
-                if (regionCount === 3) {
-                    card3.style.display = 'none';
-                    verifyInfo = verifyNewColorSignature(q3Text || '', (q1Text || '') + (q2Text || ''), q1Meta, triSignatureCodewords);
-                } else {
-                    combinedLabel = '第2QR+第3QR データ（結合）';
-                    combinedText = (q2Text || '') + (q3Text || '');
-                    card2.style.display = 'none';
-                    card3.style.display = 'none';
-                    card4.style.display = 'none';
-                    verifyInfo = verifyNewColorSignature(q4Text || '', (q1Text || '') + (q2Text || '') + (q3Text || ''), q1Meta, quadSignatureCodewords);
+                // ケース4：役割B（第2〜第N-1領域）が暗号、役割C（第N領域）が電子署名。
+                //   署名対象は 第1領域＋役割B。役割Bが2領域以上なら結合カードにまとめる。
+                const signNo = regionCount;
+                const bodyFrom = 2, bodyTo = regionCount - 1;
+                const signedText = (q1Text || '') + joinRegions(bodyFrom, bodyTo);
+                // 署名検証に使うコード語列（第1領域＋役割B）。1つでも欠けたら渡さない。
+                const cwList = [q1Codewords];
+                for (let n = bodyFrom; n <= bodyTo; n++) {
+                    cwList.push(getNewColorSignatureCodewordsForRegion(qRegionMeta, n));
                 }
+                const signatureCodewords = cwList.every(Boolean) ? cwList : null;
+                if (bodyTo > bodyFrom) {
+                    combinedLabel = labelRegions(bodyFrom, bodyTo);
+                    combinedText = joinRegions(bodyFrom, bodyTo);
+                    hideRegionCards(bodyFrom, bodyTo);
+                }
+                hideRegionCards(signNo, signNo);
+                verifyInfo = verifyNewColorSignature(txt(signNo), signedText, q1Meta, signatureCodewords);
             }
 
             if (combinedLabel) {
@@ -9203,9 +9257,9 @@
             }
 
             renderResultText('newColorRes1', q1Text || null);
-            renderResultText('newColorRes2', q2Text || null, '(未読取)');
-            renderResultText('newColorRes3', q3Text || null, '(未読取)');
-            renderResultText('newColorRes4', q4Text || null, '(未読取)');
+            for (let n = 2; n <= NEW_COLOR_MAX_REGION; n++) {
+                renderResultText('newColorRes' + n, txt(n) || null, '(未読取)');
+            }
             renderResultText('newColorResCombined', combinedText || null);
             renderCreationDateCard('newColorCreationDateCard', 'newColorCreationDateText', creationDateExt32);
             renderImageDataId(
@@ -9464,11 +9518,9 @@
                                 statusText.innerText = '新カラーQRツイン読取完了。結果を表示します...';
                                 showNewColorResult(
                                     newColorQ1Data.text,
-                                    newColorScanResult.qr2,
-                                    newColorScanResult.qr3,
-                                    newColorScanResult.qr4,
+                                    collectNewColorRegionTexts(newColorScanResult),
                                     mgmtInfo,
-                                    newColorQ1Data
+                                    { ...newColorQ1Data, newColorResult: newColorScanResult }
                                 );
                                 isProcessing = false;
                                 return;

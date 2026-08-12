@@ -1648,6 +1648,9 @@ function decodeMatrix(matrix, options) {
         });
         res.version = version;
         res.versionNumber = version.versionNumber;
+        // ★Ver3.1：正常復号のときだけ formatInfo を載せ忘れており（isRaw 側は載せていた）、
+        //   読取ログの配置情報が常に mask=null / EC=? になっていた。
+        res.formatInfo = formatInfo;
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
         res.dataBytes = Array.from(decodeBytes); // ★ RS訂正済みデータバイト（ECC除く）
         if (appEncMask && appEncMask.length > 0) {
