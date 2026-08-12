@@ -3121,7 +3121,11 @@
                     acceptRawAppEnc: true
                 };
             }
-            if (mgmtInfo && mgmtInfo.sysEncFlag && isDigitalSignMgmt(mgmtInfo)) {
+            // ★Ver3.1：sysEncFlag は要求しない。生成側は電子署名の第2QRに必ず
+            //   システム暗号化（型式情報の書き換え）を適用するが、管理部の sysEncFlag が
+            //   立っていない個体が存在するため（48ビット化の際にモードチェックだけを
+            //   見ていた時期のもの）、署名構成であることだけで sysEncDecode を使う。
+            if (mgmtInfo && isDigitalSignMgmt(mgmtInfo)) {
                 return {
                     kind: 'digitalsign',
                     winTag: 'digital_sign',
@@ -10763,9 +10767,9 @@
 
                             if (scanMode === 'normal') {
                                 // ★ 統一モード: 第1QRの管理ビットでツイン種別を自動判別。
-                                //   電子署名ツイン = sysEncFlag=true かつ 署名構成。
-                                //   ★Ver3.1：署名の判別は dataCompBits へ移した（旧 dataTypeBits は廃止）。
-                                if (mgmtInfo && mgmtInfo.sysEncFlag && isDigitalSignMgmt(mgmtInfo)) {
+                                //   ★Ver3.1：署名の判別は dataCompBits へ移し（旧 dataTypeBits は廃止）、
+                                //   sysEncFlag は条件から外した（buildTwinProfile と同じ理由）。
+                                if (mgmtInfo && isDigitalSignMgmt(mgmtInfo)) {
                                     // === 電子署名ツイン（自動判別）→ 既存の電子署名フローへ ===
                                     scanMode = 'digital_sign'; // 既存の電子署名フェーズ条件/Stage3処理を有効化
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
