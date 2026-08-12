@@ -2926,12 +2926,29 @@
             return info;
         }
 
+        // ★Ver3.1：電子署名かどうかを管理部から判定する。
+        //   旧 dataTypeBits（署名=2）は48ビット版で廃止され常に0になったため、
+        //   この判定は dataCompBits で行う必要がある。
+        //     2領域構成 : 010(=2) 公開＋電子署名
+        //     3領域以上 : 111(=7) ケース4（暗号化＋電子署名）
+        //   dataCompCase は48ビットの生値。無ければ旧値へ写した dataCompBits を見る
+        //   （旧値では2領域の署名が 2、3領域以上のケース4が 3）。
+        function isDigitalSignMgmt(mgmtInfo) {
+            if (!mgmtInfo) return false;
+            const raw = (mgmtInfo.dataCompCase !== undefined && mgmtInfo.dataCompCase !== null)
+                ? mgmtInfo.dataCompCase
+                : mgmtInfo.dataCompBits;
+            if (raw === 2 || raw === 7) return true;
+            // dataCompCase が無い経路（旧値だけを持つ mgmtInfo）向けの保険
+            return !!(mgmtInfo.dataCompCase === undefined
+                && mgmtInfo.regionCount >= 3 && mgmtInfo.dataCompBits === 3);
+        }
+
         // ★ P3: 管理ビットから QRツインの種類ラベルを作る（分析用の分類キー）
         function qrTypeLabel(mgmtInfo, modeHint) {
             if (!mgmtInfo) return (modeHint === 'digital_sign') ? '電子署名' : '不明';
             const parts = [];
-            // 電子署名は管理ビット dataTypeBits===2（署名）で判別（モード非依存）
-            const isSign = (mgmtInfo.dataTypeBits === 2) || (modeHint === 'digital_sign');
+            const isSign = isDigitalSignMgmt(mgmtInfo) || (modeHint === 'digital_sign');
             if (mgmtInfo.sysEncFlag) parts.push('システム暗号化');
             else if (mgmtInfo.appEncFlag) parts.push('ユーザ暗号化');
             else parts.push('ノーマル');
@@ -3104,7 +3121,7 @@
                     acceptRawAppEnc: true
                 };
             }
-            if (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.dataTypeBits === 2) {
+            if (mgmtInfo && mgmtInfo.sysEncFlag && isDigitalSignMgmt(mgmtInfo)) {
                 return {
                     kind: 'digitalsign',
                     winTag: 'digital_sign',
@@ -8257,11 +8274,11 @@
             return states;
         }
 
-        // ★Ver3.1：allowQ1Overlap を真にすると、第1QRと重なる候補も残す。
-        //   4色＋4色(0100) のように第1PQRも色多重化する構成では、
-        //   第1QRの位置にあるカラーQRこそ色分離の対象になるため。
-        //   既定（偽）では従来どおり第1QRと重なる候補を除外する。
-        function scoreNewColorLocationForExpected(locationInfo, q1Bounds, expectedBounds, allowQ1Overlap) {
+        // ★Ver3.1：狙っているPQRの位置（expectedBounds）と、もう一方のPQRの位置（otherBounds）を渡し、
+        //   「もう一方に近い候補」を除外する。第2PQR狙いなら otherBounds は第1QRの位置、
+        //   第1PQR狙い（4色＋4色）なら 8.5セルずらした第2QRの位置。
+        //   allowQ1Overlap は第1PQRを狙う回（＝第1QRと重なる候補が本命）を表す。
+        function scoreNewColorLocationForExpected(locationInfo, q1Bounds, expectedBounds, allowQ1Overlap, otherBounds) {
             const bbox = getQrLocationBBox(locationInfo && locationInfo.location);
             if (!bbox) return { reject: false, score: 0, expectedIou: 0, q1Iou: 0 };
             const q1Iou = q1Bounds ? rectIntersectionArea(bbox, q1Bounds) / Math.max(1, bbox.width * bbox.height + q1Bounds.width * q1Bounds.height - rectIntersectionArea(bbox, q1Bounds)) : 0;
@@ -8279,17 +8296,21 @@
                 const norm = Math.max(1, Math.hypot(expectedBounds.width, expectedBounds.height));
                 centerScore = 1 - Math.min(1, distExpected / norm);
             }
-            if (!allowQ1Overlap && q1Bounds) {
-                // ★Ver3.1：除外したいのは「第1QRそのもの」の候補だけ。
-                //   従来は 第1QRとのIoU > 0.35 で判定していたが、8.5セルずらしのQRツインは
-                //   版数が上がるほど2つのQRの重なりが増えるため（V3:0.33 / V4:0.38 / V5:0.42 / V10:0.57）、
-                //   V4以上では本命の第2QR候補まで除外していた。
-                //   中心が「第1QRの位置」と「期待位置」のどちらに近いかで判定すれば版数に依存しない。
-                const qx = q1Bounds.x + q1Bounds.width / 2;
-                const qy = q1Bounds.y + q1Bounds.height / 2;
-                const distQ1 = Math.hypot(bx - qx, by - qy);
-                const isQ1Itself = (distExpected !== null) ? (distQ1 < distExpected) : (q1Iou > 0.35);
-                if (isQ1Itself) return { reject: true, score: -9999, expectedIou: 0, q1Iou };
+            // ★Ver3.1：除外したいのは「もう一方のPQRそのもの」の候補。
+            //   従来は 第1QRとのIoU > 0.35 で判定していたが、8.5セルずらしのQRツインは
+            //   版数が上がるほど2つのQRの重なりが増えるため（V3:0.33 / V4:0.38 / V5:0.42 / V10:0.57）、
+            //   V4以上では本命の第2QR候補まで除外していた。
+            //   中心が「もう一方の位置」と「期待位置」のどちらに近いかで判定すれば版数に依存しない。
+            //   第1PQRを狙う回（4色＋4色）でも対称に効かせる。これを効かせないと、
+            //   第2QR位置の候補を第1PQRのパレットで分類してしまい（実測: 黄と黒の混同62セル、
+            //   実際のRGBは緑＝第2PQRの色）、無駄な分類と復号失敗を生んでいた。
+            const otherRef = allowQ1Overlap ? otherBounds : q1Bounds;
+            if (otherRef) {
+                const ox = otherRef.x + otherRef.width / 2;
+                const oy = otherRef.y + otherRef.height / 2;
+                const distOther = Math.hypot(bx - ox, by - oy);
+                const isOtherPqr = (distExpected !== null) ? (distOther < distExpected) : (q1Iou > 0.35);
+                if (isOtherPqr) return { reject: true, score: -9999, expectedIou: 0, q1Iou };
             }
             return {
                 reject: false,
@@ -8351,8 +8372,10 @@
             const q1BoundsVideo = getQrLocationBBox(q1Data.location);
             const shiftedBounds = computeShiftedNewColorBounds(q1LocalData);
             const shiftedBoundsVideo = computeShiftedNewColorBounds(q1Data);
-            // 対象PQRの期待位置：第1PQRなら第1QRと同じ位置、第2PQRなら8.5セルずらした位置
+            // 対象PQRの期待位置：第1PQRなら第1QRと同じ位置、第2PQRなら8.5セルずらした位置。
+            // otherBoundsLocal は「もう一方のPQRの位置」＝除外の基準。
             const expectBoundsLocal = aimPqr1 ? q1Bounds : shiftedBounds;
+            const otherBoundsLocal = aimPqr1 ? shiftedBounds : q1Bounds;
             const expectBoundsVideo = aimPqr1 ? (q1BoundsVideo || q1Bounds) : (shiftedBoundsVideo || shiftedBounds);
             const locateProbeCollector = [];
             const locateOptions = {
@@ -8405,17 +8428,17 @@
                 //   第2PQRを狙う既定時は従来どおり、第1QRと重なる候補を除外する。
                 //   第1PQRを狙う場合は、第1QRの位置にある候補こそ本命なので除外しない。
                 colorLocations = colorLocations
-                    .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, expectBoundsLocal, aimPqr1) }))
+                    .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, expectBoundsLocal, aimPqr1, otherBoundsLocal) }))
                     .filter(item => item.loc && !item.rank.reject)
                     .sort((a, b) => {
-                        // ★Ver3.1：alignFixed（アライメントパターン位置を期待値へ強制した候補）を第1キーにする。
-                        //   実測ログでは復号に成功した候補は例外なく alignFixed=1 だった一方、
-                        //   候補はどれも同じQRのわずかに違う四隅推定なので得点がほぼ同値になり、
-                        //   得点を第1キーにすると alignFixed が同点時のタイブレークとして機能しなかった。
+                        // 得点（期待位置との一致度）が第1キー。
+                        // ★Ver3.1：一時期 alignFixed を第1キーにしたが、実測を増やすと
+                        //   成功候補9件のうち alignFixed=1 は5件・0 は4件で予測力がなかったため戻した。
+                        //   同点時のタイブレークとしてのみ使う。
+                        if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
                         const aFixed = a.loc.probeMeta && a.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
                         const bFixed = b.loc.probeMeta && b.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
-                        if (aFixed !== bFixed) return bFixed - aFixed;
-                        return b.rank.score - a.rank.score;
+                        return bFixed - aFixed;
                     })
                     .map(item => item.loc);
             }
@@ -8553,7 +8576,13 @@
                             break;
                         }
                         if (storeRegionNo > q1Data.mgmtInfo.regionCount
-                            || hasNewColorRegionAcquired(result, q1Data.mgmtInfo, storeRegionNo)) {
+                            || hasNewColorRegionAcquired(result, q1Data.mgmtInfo, storeRegionNo)
+                            // ★Ver3.1：暗号化領域へは平文復号の結果を回さない。
+                            //   クロスリージョン受理は「非暗号化領域のみ」を前提に入れた仕組み
+                            //   （acceptCrossRegion: !baseOptions）だが、格納先の判定が抜けていた。
+                            //   暗号領域のQR自体は正常なQRなのでRSは通ってしまい、
+                            //   パスワードを聞かずに暗号文をそのまま結果表示する恐れがある。
+                            || isNewColorRegionEncrypted(q1Data.mgmtInfo, storeRegionNo)) {
                             colorProbe.regions[String(regionNo)] = 'failed';
                             continue;
                         }
@@ -10734,9 +10763,9 @@
 
                             if (scanMode === 'normal') {
                                 // ★ 統一モード: 第1QRの管理ビットでツイン種別を自動判別。
-                                //   電子署名ツイン = sysEncFlag=true かつ dataTypeBits===2(署名)。
-                                //   （生成側が第1/第2QR両方に sysEncビット＋署名dataTypeを付与）
-                                if (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.dataTypeBits === 2) {
+                                //   電子署名ツイン = sysEncFlag=true かつ 署名構成。
+                                //   ★Ver3.1：署名の判別は dataCompBits へ移した（旧 dataTypeBits は廃止）。
+                                if (mgmtInfo && mgmtInfo.sysEncFlag && isDigitalSignMgmt(mgmtInfo)) {
                                     // === 電子署名ツイン（自動判別）→ 既存の電子署名フローへ ===
                                     scanMode = 'digital_sign'; // 既存の電子署名フェーズ条件/Stage3処理を有効化
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
