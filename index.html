@@ -1148,8 +1148,13 @@
         const NEW_COLOR_CALIB_EM_ITERATIONS = 2;            // セントロイド適応の反復回数
         const NEW_COLOR_CALIB_EM_UPDATE_MIN_MARGIN = 12;    // セントロイド更新に使うセルの最小マージン(L2)
         const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 60;         // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
-        const NEW_COLOR_DEFER_DECODE_AMB_PCT = 0.12;        // 必要領域の曖昧セル率がこれ超なら復号を後回し
-        const NEW_COLOR_DEFER_DECODE_AMB_FLOOR = 20;        // 後回し判定の下限セル数
+        // ★Ver3.1：実測ログ（dim=29）では、復号に成功した候補の曖昧セル数は必要領域平均で 0.5〜9、
+        //   失敗した候補は 13〜35 と明確に分かれていた。従来の 0.12（=100セル）ではほぼ全候補が
+        //   「即復号」に入り、位置検出順のまま悪い候補から総当たりしていた（実測: 本命が5番目）。
+        //   しきい値を下げて悪い候補を後回しにすると、後回し組は曖昧セル数の昇順で消化されるため
+        //   本命が先頭に来る。
+        const NEW_COLOR_DEFER_DECODE_AMB_PCT = 0.015;       // 必要領域の曖昧セル率がこれ超なら復号を後回し
+        const NEW_COLOR_DEFER_DECODE_AMB_FLOOR = 8;         // 後回し判定の下限セル数
         const NEW_COLOR_FLIP_RETRY_STEPS = [2, 4, 6, 8, 12, 16]; // 曖昧セル反転リトライの累積セル数
         const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
         const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
@@ -8403,11 +8408,14 @@
                     .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, expectBoundsLocal, aimPqr1) }))
                     .filter(item => item.loc && !item.rank.reject)
                     .sort((a, b) => {
-                        if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
-                        // ログ実測では alignFixed=1（アライメント位置強制）の候補が高確率で復号成功するため優先
+                        // ★Ver3.1：alignFixed（アライメントパターン位置を期待値へ強制した候補）を第1キーにする。
+                        //   実測ログでは復号に成功した候補は例外なく alignFixed=1 だった一方、
+                        //   候補はどれも同じQRのわずかに違う四隅推定なので得点がほぼ同値になり、
+                        //   得点を第1キーにすると alignFixed が同点時のタイブレークとして機能しなかった。
                         const aFixed = a.loc.probeMeta && a.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
                         const bFixed = b.loc.probeMeta && b.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
-                        return bFixed - aFixed;
+                        if (aFixed !== bFixed) return bFixed - aFixed;
+                        return b.rank.score - a.rank.score;
                     })
                     .map(item => item.loc);
             }
@@ -8749,6 +8757,15 @@
                 const maxColors = Math.max.apply(null, st.colors);
                 colorCountBits = (maxColors === 8) ? 3 : (maxColors === 4 ? 2 : 0);
             }
+            // ★Ver3.1：dataCompBits は2ビット→3ビットに拡張され、3領域以上では
+            //   100〜111（ケース1〜4）になった。既存コードは旧2ビットの 0〜3 を前提に
+            //   暗号化判定・パスワード要求・結果表示を行うため、ここで旧値へ写す。
+            //     100 ケース1（独立公開）      → 0 通常
+            //     101 ケース2（連続データ）    → 1 連続
+            //     110 ケース3（ユーザー暗号化）→ 2 全領域が暗号
+            //     111 ケース4（暗号化＋電子署名）→ 3 3領域は第2領域／4領域は第2・第3領域が暗号
+            //   2領域構成（000〜011）は newColor 経路を通らないためそのまま。
+            const dataCompLegacy = (p.dataCompBits >= 4) ? (p.dataCompBits - 4) : p.dataCompBits;
             return {
                 // --- 新フィールド ---
                 systemStruBits: p.systemStruBits,
@@ -8766,7 +8783,8 @@
                 qrNo: p.qrNo,
                 colorCountBits: colorCountBits,
                 colorSpecBits: p.colorSpec1,
-                dataCompBits: p.dataCompBits,
+                dataCompBits: dataCompLegacy,
+                dataCompCase: p.dataCompBits,       // 48ビット版の生値（100〜111＝ケース1〜4）
                 regionIndexBits: 0,                 // 48ビット版では廃止
                 sameDataFlag: p.sameDataFlag,
                 sysEncFlag: p.sysEncFlag,
@@ -9057,8 +9075,17 @@
             const dataComp = mgmtInfo ? mgmtInfo.dataCompBits : 0;
 
             // タイトル更新
+            // ★Ver3.1：構成名は systemStruBits から出す。
+            //   従来は領域数だけで「4領域化・8色」と決め打ちしていたため、
+            //   4色＋4色(0100) も「8色」と誤表示していた。
             const titleEl = document.getElementById('newColorResultTitle');
-            if (regionCount === 4) {
+            const MT = window.QRTwinMgmt48;
+            const stTitle = (MT && mgmtInfo && mgmtInfo.systemStruBitsStr)
+                ? MT.deriveStructure(mgmtInfo.systemStruBitsStr) : null;
+            if (stTitle && stTitle.colors) {
+                const colorText = stTitle.colors.map(c => c === 2 ? '白黒' : (c + '色')).join('＋');
+                titleEl.innerText = '新カラー符号化 読取り結果（' + regionCount + '領域化・' + colorText + '）';
+            } else if (regionCount === 4) {
                 titleEl.innerText = '新カラー符号化 読取り結果（4領域化・8色）';
             } else {
                 titleEl.innerText = '新カラー符号化 読取り結果（3領域化・4色）';
