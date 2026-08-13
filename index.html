@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader27</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1158,7 +1158,12 @@
         const NEW_COLOR_CALIB_MIN_SEED_CELLS = 8;           // 実測セントロイド採用に必要な確信セル数
         const NEW_COLOR_CALIB_EM_ITERATIONS = 2;            // セントロイド適応の反復回数
         const NEW_COLOR_CALIB_EM_UPDATE_MIN_MARGIN = 12;    // セントロイド更新に使うセルの最小マージン(L2)
-        const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 60;         // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
+        // ★Ver3.1：黒白アンカー間の最小距離。未満なら適応色較正を捨てて固定プロファイル分類に戻す。
+        //   実測ログ（4色＋8色）では、正常フレームの ancDist は 311〜343 で安定していたのに対し、
+        //   較正が破綻したフレームは 88 と 121 だった。88 のフレームでは黒セントロイドが 141/131/141、
+        //   白が 77/81/107 と明暗が逆転し、曖昧セルが 294/841（35%）まで悪化して全領域失敗していた。
+        //   60 では通してしまうので、実測の谷間にあたる 150 まで上げる。
+        const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 150;        // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
         // ★Ver3.1：実測ログ（dim=29）では、復号に成功した候補の曖昧セル数は必要領域平均で 0.5〜9、
         //   失敗した候補は 13〜35 と明確に分かれていた。従来の 0.12（=100セル）ではほぼ全候補が
         //   「即復号」に入り、位置検出順のまま悪い候補から総当たりしていた（実測: 本命が5番目）。
@@ -7137,6 +7142,72 @@
             return (x1 - x0) * (y1 - y0);
         }
 
+        // ★Ver3.1：四隅が既に分かっているQR（＝復号済みの第1QR）から、
+        //   色分離のサンプラが使える位置情報を組み立てる。
+        //   jsQR の extractLocations が返すものと同じ形（location / dimension /
+        //   moduleSize / mappingFunction）にする。
+        //   mappingFunction はモジュール座標(0..dimension)をピクセルへ写す射影変換で、
+        //   jsQR の squareToQuadrilateral と同じ式を使う（モジュール四隅は矩形なので
+        //   単位正方形への正規化は 1/dimension の割り算で足りる）。
+        function buildLocInfoFromKnownCorners(location, versionNumber) {
+            if (!location || !versionNumber) return null;
+            const dimension = 17 + 4 * versionNumber;
+            if (dimension < 21) return null;
+            const tl = location.topLeftCorner;
+            const tr = location.topRightCorner;
+            const bl = location.bottomLeftCorner;
+            const br = location.bottomRightCorner || (
+                tl && tr && bl ? { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y } : null
+            );
+            if (!tl || !tr || !bl || !br) return null;
+
+            // 単位正方形 (0,0)-(1,0)-(1,1)-(0,1) を四隅へ写す変換
+            const dx3 = tl.x - tr.x + br.x - bl.x;
+            const dy3 = tl.y - tr.y + br.y - bl.y;
+            let t;
+            if (dx3 === 0 && dy3 === 0) {
+                t = {
+                    a11: tr.x - tl.x, a12: tr.y - tl.y, a13: 0,
+                    a21: br.x - tr.x, a22: br.y - tr.y, a23: 0,
+                    a31: tl.x, a32: tl.y, a33: 1
+                };
+            } else {
+                const dx1 = tr.x - br.x, dx2 = bl.x - br.x;
+                const dy1 = tr.y - br.y, dy2 = bl.y - br.y;
+                const den = dx1 * dy2 - dx2 * dy1;
+                if (!den) return null;
+                const a13 = (dx3 * dy2 - dx2 * dy3) / den;
+                const a23 = (dx1 * dy3 - dx3 * dy1) / den;
+                t = {
+                    a11: tr.x - tl.x + a13 * tr.x, a12: tr.y - tl.y + a13 * tr.y, a13,
+                    a21: bl.x - tl.x + a23 * bl.x, a22: bl.y - tl.y + a23 * bl.y, a23,
+                    a31: tl.x, a32: tl.y, a33: 1
+                };
+            }
+            const mappingFunction = (x, y) => {
+                const u = x / dimension, v = y / dimension;
+                const den = t.a13 * u + t.a23 * v + t.a33;
+                return {
+                    x: (t.a11 * u + t.a21 * v + t.a31) / den,
+                    y: (t.a12 * u + t.a22 * v + t.a32) / den
+                };
+            };
+            const side = (Math.hypot(tr.x - tl.x, tr.y - tl.y) + Math.hypot(bl.x - tl.x, bl.y - tl.y)) / 2;
+            const moduleSize = side / dimension;
+            if (!(moduleSize > 0)) return null;
+            return {
+                location: {
+                    topLeftCorner: tl, topRightCorner: tr,
+                    bottomRightCorner: br, bottomLeftCorner: bl
+                },
+                dimension,
+                moduleSize,
+                mappingFunction,
+                probeMeta: { seededFromFirstQr: true },
+                inverted: false
+            };
+        }
+
         function computeShiftedNewColorBounds(q1Data, shiftModules = NEW_COLOR_SHIFT_MODULES) {
             const affine = buildNewColorAffine(q1Data);
             if (!affine || !q1Data || !q1Data.location) return null;
@@ -7837,6 +7908,12 @@
             );
             // アンカーが分離していない＝マッピング不良。適応せず従来分類に任せる。
             if (anchorDist < NEW_COLOR_CALIB_MIN_ANCHOR_DIST) return null;
+            // ★Ver3.1：明暗の逆転も弾く。実測ログでは暗アンカーが 141/131/141、
+            //   明アンカーが 77/81/107 と逆転したフレームがあり、そのまま較正すると
+            //   全セルの分類が反転して曖昧セルが35%まで悪化していた（黄と黒の混同167セル）。
+            //   距離だけでは符号を見ないので、輝度の大小関係を明示的に確かめる。
+            const anchorLuma = (a) => 0.299 * a.r + 0.587 * a.g + 0.114 * a.b;
+            if (anchorLuma(darkAnchor) >= anchorLuma(lightAnchor)) return null;
 
             const total = n * n;
             const centroids = {};
@@ -8490,6 +8567,21 @@
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
             if (cacheFresh) {
                 colorLocations.unshift(locCacheEntry.locInfo);
+            }
+
+            // ★Ver3.1：第1PQRを狙う回は「第1QRの位置」がそのまま答え。
+            //   第1QRはStage1で復号済みなので四隅が確定しており、locate をやり直す必要がない。
+            //   実測ログ（4色＋8色）では、第1PQRの locate が
+            //   ・シンボル外まで含む格子（白セル185個、margin=0）
+            //   ・縮尺違いの格子（modPx=3.3）
+            //   といった外れ候補ばかりを返し、第2領域だけ永久に取れずタイムアウトしていた
+            //   （第3〜第5領域は復号成功していた）。確定済みの位置を先頭の候補にする。
+            if (aimPqr1) {
+                const seed = buildLocInfoFromKnownCorners(
+                    q1LocalData.location,
+                    q1Data.version || q1Data.versionNumber || null
+                );
+                if (seed) colorLocations.unshift(seed);
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
