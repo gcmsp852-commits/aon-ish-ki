@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader28</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2116,7 +2116,7 @@
                         ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
                         : '-';
                     lines.push(
-                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.seedFallback ? ' seed=1' : ''} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
@@ -7208,6 +7208,24 @@
             };
         }
 
+        // ★Ver3.1：格子のセル中心が画像内にどれだけ入っているかを見る。
+        //   縮小フレームやクロップでは第1QRが画角の外に出ることがあり、
+        //   そのまま色分類すると白セルばかり拾って時間だけ使う（実測: 841中667〜783が白）。
+        function isLocInfoMostlyInside(locInfo, width, height, minRatio = 0.9) {
+            if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return false;
+            const n = locInfo.dimension;
+            let inside = 0, total = 0;
+            // 全セルを見る必要はないので4セルおきに間引いて数える
+            for (let r = 0; r < n; r += 4) {
+                for (let c = 0; c < n; c += 4) {
+                    const p = locInfo.mappingFunction(c + 0.5, r + 0.5);
+                    total++;
+                    if (p.x >= 0 && p.y >= 0 && p.x < width && p.y < height) inside++;
+                }
+            }
+            return total > 0 && (inside / total) >= minRatio;
+        }
+
         function computeShiftedNewColorBounds(q1Data, shiftModules = NEW_COLOR_SHIFT_MODULES) {
             const affine = buildNewColorAffine(q1Data);
             if (!affine || !q1Data || !q1Data.location) return null;
@@ -8569,19 +8587,24 @@
                 colorLocations.unshift(locCacheEntry.locInfo);
             }
 
-            // ★Ver3.1：第1PQRを狙う回は「第1QRの位置」がそのまま答え。
-            //   第1QRはStage1で復号済みなので四隅が確定しており、locate をやり直す必要がない。
-            //   実測ログ（4色＋8色）では、第1PQRの locate が
-            //   ・シンボル外まで含む格子（白セル185個、margin=0）
-            //   ・縮尺違いの格子（modPx=3.3）
-            //   といった外れ候補ばかりを返し、第2領域だけ永久に取れずタイムアウトしていた
-            //   （第3〜第5領域は復号成功していた）。確定済みの位置を先頭の候補にする。
+            // ★Ver3.1：第1PQRを狙う回の保険として、確定済みの第1QR四隅から作った格子を
+            //   「最後の候補」として足す。locate が1つも候補を返さないフレームでも
+            //   第2領域を試せるようにするのが目的。
+            //   ★先頭に置いてはいけない：実測ログ（4色＋8色・5試行）では、この種で復号できた
+            //     ことは一度も無く（成功はすべて locate 候補側）、曖昧セルも locate 候補の
+            //     約3倍だった（種25/841 に対し locate 候補8/841）。四隅だけの写像では
+            //     アライメントパターンによる歪み補正が効かないためで、先頭に置くと
+            //     毎フレーム総当たりして時間予算を食い潰す（成功時の平均が 2.7秒→9.4秒に悪化）。
             if (aimPqr1) {
                 const seed = buildLocInfoFromKnownCorners(
                     q1LocalData.location,
                     q1Data.version || q1Data.versionNumber || null
                 );
-                if (seed) colorLocations.unshift(seed);
+                // 画像外を指す種は分類しても白セルばかりで無意味（実測: 841中667〜783が白）
+                if (seed && isLocInfoMostlyInside(seed, width, height)) {
+                    seed.seedFallback = true;   // 常に後回し扱いにする印
+                    colorLocations.push(seed);
+                }
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
@@ -8784,6 +8807,7 @@
                     moduleSize: locInfo && locInfo.moduleSize,
                     regionCount: q1Data.mgmtInfo.regionCount,
                     targetPqrNo: targetPqrNo || null,
+                    seedFallback: !!(locInfo && locInfo.seedFallback),
                     planList: targetPlanList,
                     regions: {}
                 };
@@ -8809,7 +8833,14 @@
                 const dim = locInfo.dimension || 0;
                 const ambAvg = neededRegionAmbiguity(colorProbe);
                 const deferLimit = Math.max(NEW_COLOR_DEFER_DECODE_AMB_FLOOR, dim * dim * NEW_COLOR_DEFER_DECODE_AMB_PCT);
-                if (Number.isFinite(ambAvg) && ambAvg <= deferLimit) {
+                // ★Ver3.1：第1QR四隅から作った保険の格子は必ず後回しにする。
+                //   曖昧セルは少なく出る（＝即復号の条件を満たしてしまう）のに、
+                //   アライメント補正が無い分だけ実際には復号できないため、
+                //   即復号側に入れると locate 候補の順番を奪って時間予算を潰す。
+                if (locInfo.seedFallback) {
+                    cand.ambAvg = Infinity;
+                    deferred.push(cand);
+                } else if (Number.isFinite(ambAvg) && ambAvg <= deferLimit) {
                     stageComplete = attemptCandidateDecode(cand);
                 } else {
                     cand.ambAvg = ambAvg;
