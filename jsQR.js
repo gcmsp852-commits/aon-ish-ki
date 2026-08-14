@@ -838,6 +838,13 @@ jsQR.decodeTwinCombined = function (rawA, rawB, options) {
         return null;
     return decoder_1.decodeTwinCombined(rawA, rawB, options);
 };
+// ★Ver3.1：モジュール行列から型式情報（誤り訂正レベル・マスク番号）だけを読む。
+//   単一4色QR(1001)の逆順プレーンを読み戻すために使う。
+jsQR.readMatrixFormat = function (moduleMatrix) {
+    var matrix = buildModuleBitMatrix(moduleMatrix);
+    if (!matrix) return null;
+    return decoder_1.readMatrixFormatInformation(matrix);
+};
 // ★ 消失位置を指定できるRS復号（検証・診断用に公開）
 jsQR.decodeWithErasures = function (bytes, twoS, erasurePositions) {
     if (!bytes)
@@ -1714,6 +1721,18 @@ function decode(matrix, options) {
     return decodeMatrix(matrix, options);
 }
 exports.decode = decode;
+// ★Ver3.1：型式情報（誤り訂正レベル・マスク番号）だけを読む。
+//   4色QRコード(1001)の第2プレーンは走査順を逆に詰めてあり、
+//   読取側で並べ直すのにマスク番号が要る。マスクは位置依存なので
+//   「マスク解除 → 並べ直し → マスク再適用」の手順を踏む必要がある。
+exports.readMatrixFormatInformation = function (matrix) {
+    try {
+        return readFormatInformation(matrix) || null;
+    }
+    catch (e) {
+        return null;
+    }
+};
 // ★ 新設：保存しておいたRAWデータとマスクから処理を再開する関数
 function resumeDecode(rawData, appMask) {
     try {

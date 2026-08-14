@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader29</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3065,7 +3065,9 @@
             return { ...box, sx: x0, sy: y0, sw: x1 - x0, sh: y1 - y0 };
         }
 
-        function estimateQ2BBoxFromQ1(firstQrPoints, versionNumber) {
+        // ★Ver3.1：shiftCellsOverride に 0 を渡すと第1QR自身を切り出す（単一QR用）。
+        //   省略時は従来どおり 8.5セルずらした第2QRの位置を切り出す。
+        function estimateQ2BBoxFromQ1(firstQrPoints, versionNumber, shiftCellsOverride) {
             if (!firstQrPoints || firstQrPoints.length !== 4) return null;
             if (!video || !video.videoWidth || !video.videoHeight) return null;
             const tl = firstQrPoints[0];
@@ -3076,7 +3078,7 @@
             // versionNumber 未取得時は V3 (N=29) 相当をデフォルトに（実測誤差は後段クロップ余白で吸収）
             const N = (versionNumber && versionNumber > 0) ? (17 + 4 * versionNumber) : 29;
             // 「8.5セル分」のシフトをQ1のローカル軸（TL→TR, TL→BL）に沿って計算
-            const shiftCells = 8.5;
+            const shiftCells = Number.isFinite(shiftCellsOverride) ? shiftCellsOverride : 8.5;
             const k = shiftCells / (N - 1); // (N-1)セルでTL→TRなので比率
             const dxX = (tr.x - tl.x) * k;
             const dxY = (tr.y - tl.y) * k;
@@ -3544,7 +3546,13 @@
 
             let geoQ2Box = null;
             if (profile.firstQrPoints) {
-                let q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
+                // ★Ver3.1：単一QR（1001/1010）は物理QRが1枚だけなので、
+                //   8.5セルずらした位置ではなく第1QR自身を切り出す。
+                //   ずらした位置を切ると対象が画角の端に寄り、色分離の格子が取れない。
+                const singleQrGeo = (profile.kind === 'newcolor') && isSingleQrMgmt(profile.newColorMgmtInfo);
+                let q2box = singleQrGeo
+                    ? estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber, 0)
+                    : estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
                 // ★Ver3.1：第1PQRも色多重化する構成（4色＋4色 など）では第1QRの位置も
                 //   色分離の対象になる。幾何クロップは第2QRを中心に余白30%で切るため、
                 //   第1QRの左上端が数モジュールはみ出すことがある（V3で実測約1モジュール）。
@@ -7439,6 +7447,56 @@
             return variants;
         }
 
+        // ★Ver3.1：QRのデータマスク関数（規格の8種）。位置(row,col)で反転するかを返す。
+        const QR_DATA_MASK_FUNCS = [
+            (r, c) => ((r + c) % 2) === 0,
+            (r, c) => (r % 2) === 0,
+            (r, c) => (c % 3) === 0,
+            (r, c) => ((r + c) % 3) === 0,
+            (r, c) => ((Math.floor(r / 2) + Math.floor(c / 3)) % 2) === 0,
+            (r, c) => ((r * c) % 2) + ((r * c) % 3) === 0,
+            (r, c) => ((((r * c) % 2) + ((r * c) % 3)) % 2) === 0,
+            (r, c) => ((((r + c) % 2) + ((r * c) % 3)) % 2) === 0
+        ];
+
+        // ★Ver3.1：逆順に詰められた第2プレーンを元の並びへ戻す。
+        //   生成側は「マスク解除 → 走査順を逆に詰め替え → 同じマスクを再適用」で作るので、
+        //   読取側は同じ手順をもう一度かける（詰め替えは対合なので2回で元に戻る）。
+        //   マスク番号は型式情報から読む。型式情報はデータ領域の外なので
+        //   詰め替えの影響を受けず、そのまま読める。
+        function restoreReversedPlaneMatrix(bits) {
+            const M = window.QRTwinMgmt48;
+            if (!M || !bits || !bits.length) return null;
+            const n = bits.length;
+            const version = (n - 17) / 4;
+            if (!Number.isInteger(version) || version < 1 || version > 40) return null;
+            if (!window.jsQR || typeof jsQR.readMatrixFormat !== 'function') return null;
+
+            const fmt = jsQR.readMatrixFormat(bits);
+            if (!fmt || !Number.isFinite(fmt.dataMask)) return null;
+            const maskFn = QR_DATA_MASK_FUNCS[fmt.dataMask];
+            if (!maskFn) return null;
+
+            const order = M.dataModuleOrder(version);
+            if (!order.length) return null;
+            const rev = M.reversedModuleOrder(order);
+
+            // マスクを解除した素のビットを作る（データ領域だけ）
+            const out = new Array(n);
+            for (let r = 0; r < n; r++) out[r] = bits[r].slice();
+            const raw = new Array(order.length);
+            for (let i = 0; i < order.length; i++) {
+                const [x, y] = order[i];
+                raw[i] = !!bits[y][x] !== !!maskFn(y, x);
+            }
+            // 走査順の i 番目を逆順の i 番目へ移し、同じマスクを掛け直す
+            for (let i = 0; i < order.length; i++) {
+                const [dx, dy] = rev[i];
+                out[dy][dx] = raw[i] !== !!maskFn(dy, dx);
+            }
+            return out;
+        }
+
         function decodeNewColorBitMatrixQr(bitsMatrix, expectedQrNo, jsQrOptions = null) {
             if (!bitsMatrix || !bitsMatrix.length || !window.jsQR || typeof jsQR.decodeMatrix !== 'function') return null;
             const phaseBase = (jsQrOptions && jsQrOptions.probePhase) || ('newColor matrix Q' + (expectedQrNo + 1));
@@ -8460,8 +8518,18 @@
             // このPQRが運ぶ「領域番号 ↔ プレーン番号」の対応（第1LQRは白黒読取済みなので含まれない）
             const targetPlanList = newColorRegionPlanList(q1Data.mgmtInfo, targetPqrNo);
             if (!targetPlanList.length) return null;
-            // 第1PQRを狙う回か（4色＋4色のときだけ true になる）
+            // 第1PQRを狙う回か（4色＋4色・単一QRのときに true になる）
             const aimPqr1 = (targetPqrNo === 1);
+            // ★Ver3.1：単一QR（1001/1010）は物理QRが1枚だけ。
+            //   「もう一方のPQR」が存在しないので、そこを基準にした候補除外は行わない。
+            const singleQr = isSingleQrMgmt(q1Data.mgmtInfo);
+            // 単一4色QR＋同一データのときだけ、第2プレーンが逆順に詰められている
+            const needsPlaneReorder = (() => {
+                const M = window.QRTwinMgmt48;
+                const mg = q1Data.mgmtInfo;
+                return !!(M && mg && mg.systemStruBitsStr
+                    && M.needsReversedSecondPlane(mg.systemStruBitsStr, mg.sameDataFlag));
+            })();
             // Stage3の反復フレームでは1回の処理に時間予算を設ける。
             // 悪い（ピンボケ等）フレームへ候補総当たりで数百ms〜秒単位を注ぎ込むより、
             // 早く次のフレーム（フォーカスが合った瞬間）を取り込むほうが確定が速い（ログ実測）。
@@ -8513,7 +8581,8 @@
             // 対象PQRの期待位置：第1PQRなら第1QRと同じ位置、第2PQRなら8.5セルずらした位置。
             // otherBoundsLocal は「もう一方のPQRの位置」＝除外の基準。
             const expectBoundsLocal = aimPqr1 ? q1Bounds : shiftedBounds;
-            const otherBoundsLocal = aimPqr1 ? shiftedBounds : q1Bounds;
+            //   単一QRでは「もう一方のPQR」が存在しないため除外基準を持たない
+            const otherBoundsLocal = singleQr ? null : (aimPqr1 ? shiftedBounds : q1Bounds);
             const expectBoundsVideo = aimPqr1 ? (q1BoundsVideo || q1Bounds) : (shiftedBoundsVideo || shiftedBounds);
             const locateProbeCollector = [];
             const locateOptions = {
@@ -8652,7 +8721,14 @@
                         continue;
                     }
                     const bitIndex = plan.bitIndex;
-                    const bits = buildBitMatrixFromColorStates(cand.states, decoder.states, bitIndex);
+                    let bits = buildBitMatrixFromColorStates(cand.states, decoder.states, bitIndex);
+                    // ★Ver3.1：単一4色QR(1001)へ同一データを入れた場合、第2プレーンは
+                    //   走査順を逆に詰めてある（1か所の汚れが両領域の同じコード語を壊さないように）。
+                    //   復号前に元の並びへ戻す。
+                    if (needsPlaneReorder && bitIndex === 1) {
+                        const restored = restoreReversedPlaneMatrix(bits);
+                        if (restored) bits = restored;
+                    }
                     let qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
                     if (!qrMatrix && cand.cells && cand.cells.length) {
                         qrMatrix = retryNewColorDecodeWithAmbiguousFlips(bits, cand.cells, decoder, bitIndex, regionNo, regionDecodeOptions(regionNo, locInfo));
@@ -9018,6 +9094,24 @@
 
         function isNewColorMgmtInfo(mgmtInfo) {
             return !!(mgmtInfo && (mgmtInfo.regionCount >= 3 || mgmtInfo.colorCountBits === 2 || mgmtInfo.colorCountBits === 3));
+        }
+
+        // ★Ver3.1：単一QR構成（物理QRが1枚。1000=白黒 / 1001=4色 / 1010=8色）か。
+        //   ツイン前提の処理（8.5セルずらした第2QRを探す・幾何クロップを第2QR中心に取る）を
+        //   分岐させるために使う。
+        function isSingleQrMgmt(mgmtInfo) {
+            const M = window.QRTwinMgmt48;
+            if (!M || !mgmtInfo || !mgmtInfo.systemStruBitsStr) return false;
+            const st = M.deriveStructure(mgmtInfo.systemStruBitsStr);
+            return !!(st && st.isTwin === false);
+        }
+
+        // 単一QRのうち、色多重化を持たない構成（1000）。第1QRだけで読取が完結する。
+        function isSingleMonoQrMgmt(mgmtInfo) {
+            const M = window.QRTwinMgmt48;
+            if (!isSingleQrMgmt(mgmtInfo)) return false;
+            const st = M.deriveStructure(mgmtInfo.systemStruBitsStr);
+            return !!(st && st.planes && st.planes[0] === 1);
         }
 
         function normalizeNewColorMgmtInfo(mgmtInfo) {
@@ -10928,6 +11022,18 @@
                                 }
                                 recordImmediatePrelocate(false, false, 'new_color');
                                 continue;
+                            }
+
+                            // ★Ver3.1：単一QR・白黒（1000）は物理QRが1枚しかなく、
+                            //   第2領域も埋草なので第1QRだけで完結する。
+                            //   ここで抜けないと存在しない第2QRを探し続けてタイムアウトする。
+                            if (isSingleMonoQrMgmt(mgmtInfo)) {
+                                secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts, center: computeCenterFromPoints(resultPts) };
+                                getScanDebugStats().q2NotRequiredReason = 'singleQr(' + mgmtInfo.systemStruBitsStr + ')';
+                                isScanning = false;
+                                isProcessing = false;
+                                showResultScreen();
+                                return;
                             }
 
                             // 同一データフラグ
