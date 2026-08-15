@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader35</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -269,6 +269,10 @@
                     <img id="dsImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
                 </div>
             </div>
+            <div id="userIdCard" class="qr-data-card" style="border-color: #BA68C8; margin-top:12px; display:none;">
+                <label style="color:#BA68C8;">ユーザーID</label>
+                <div class="text" id="userIdText">-</div>
+            </div>
             <div class="qr-data-card" id="scanStatsCard" style="border-color:#FF1744; margin-top:12px;">
                 <label style="color:#FF1744;">読取デバッグ情報</label>
                 <div class="text" id="scanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
@@ -370,6 +374,10 @@
             <div id="newColorCreationDateCard" class="qr-data-card" style="border-color: #81C784; display:none;">
                 <label style="color:#81C784;">QRツイン作成日時</label>
                 <div class="text" id="newColorCreationDateText">-</div>
+            </div>
+            <div id="newColorUserIdCard" class="qr-data-card" style="border-color: #BA68C8; display:none;">
+                <label style="color:#BA68C8;">ユーザーID</label>
+                <div class="text" id="newColorUserIdText">-</div>
             </div>
             <div id="newColorImageContainer" style="margin-top:12px; text-align:center; display:none;">
                 <img id="newColorImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
@@ -2875,6 +2883,9 @@
                 managementExt32: res.managementExt32,
                 expiryExt32: res.expiryExt32,
                 readerIdExt32: res.readerIdExt32,
+                userIdExt32: res.userIdExt32,
+                dataPosition: res.dataPosition,
+                webDataKind: res.webDataKind,
                 readLimitBits: res.readLimitBits,
                 qrTwinUniqueId8: res.qrTwinUniqueId8,
                 locationLatExt24: res.locationLatExt24,
@@ -2945,16 +2956,24 @@
         // ★Ver3.1：電子署名かどうかを管理部から判定する。
         //   旧 dataTypeBits（署名=2）は48ビット版で廃止され常に0になったため、
         //   この判定は dataCompBits で行う必要がある。
-        //     2領域構成 : 010(=2) 公開＋電子署名
+        //     2領域構成 : 011(=3) 公開＋電子署名   ★2026.08.09版仕様
         //     3領域以上 : 111(=7) ケース4（暗号化＋電子署名）
         //   dataCompCase は48ビットの生値。無ければ旧値へ写した dataCompBits を見る
-        //   （旧値では2領域の署名が 2、3領域以上のケース4が 3）。
+        //   （旧値では3領域以上のケース4が 3）。
         function isDigitalSignMgmt(mgmtInfo) {
             if (!mgmtInfo) return false;
             const raw = (mgmtInfo.dataCompCase !== undefined && mgmtInfo.dataCompCase !== null)
                 ? mgmtInfo.dataCompCase
                 : mgmtInfo.dataCompBits;
-            if (raw === 2 || raw === 7) return true;
+            if (raw === 7) return true;                       // 3領域以上 ケース4
+            if (raw === 3 && mgmtInfo.regionCount === 2) return true;   // 2領域 電子署名
+            // ★旧仕様（2026.08.08）で作った2領域の個体を読めるようにする。
+            //   旧 010 は電子署名、新 010 はユーザ暗号化。両者は appEncFlag で区別できる
+            //   （署名は sysEncFlag だけが立ち、appEncFlag は立たない）。
+            //   値 2 は3領域以上の範囲（100〜111＝4〜7）には現れない。
+            //   regionCount が分からない経路（旧値だけを持つ mgmtInfo）でも拾えるようにする。
+            if (raw === 2 && !mgmtInfo.appEncFlag
+                && (mgmtInfo.regionCount === undefined || mgmtInfo.regionCount === 2)) return true;
             // dataCompCase が無い経路（旧値だけを持つ mgmtInfo）向けの保険
             return !!(mgmtInfo.dataCompCase === undefined
                 && mgmtInfo.regionCount >= 3 && mgmtInfo.dataCompBits === 3);
@@ -2977,6 +2996,12 @@
             if (mgmtInfo.hasLocation) parts.push('読取位置');
             if (mgmtInfo.hasMunicipality) parts.push('市町村コード');
             if (mgmtInfo.readLimitBits) parts.push('読取回数(' + mgmtInfo.readLimitBits + ')');
+            if (mgmtInfo.userIdBit) parts.push('ユーザーID');
+            if (mgmtInfo.dataPosition) {
+                const MW = window.QRTwinMgmt48;
+                const kind = MW ? MW.webDataKindLabel(mgmtInfo.webDataKind) : '';
+                parts.push('WEBデータID' + (kind ? '(' + kind + ')' : ''));
+            }
             return parts.join('+');
         }
 
@@ -3432,6 +3457,9 @@
                     managementExt32: res.managementExt32,
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
+                    userIdExt32: res.userIdExt32,
+                    dataPosition: res.dataPosition,
+                    webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
                     qrTwinUniqueId8: res.qrTwinUniqueId8,
                     locationLatExt24: res.locationLatExt24,
@@ -3779,6 +3807,9 @@
                             managementExt32: _comb.managementExt32,
                             expiryExt32: _comb.expiryExt32,
                             readerIdExt32: _comb.readerIdExt32,
+                            userIdExt32: _comb.userIdExt32,
+                            dataPosition: _comb.dataPosition,
+                            webDataKind: _comb.webDataKind,
                             readLimitBits: _comb.readLimitBits,
                             qrTwinUniqueId8: _comb.qrTwinUniqueId8,
                             locationLatExt24: _comb.locationLatExt24,
@@ -4635,6 +4666,9 @@
                     managementExt32: res.managementExt32,
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
+                    userIdExt32: res.userIdExt32,
+                    dataPosition: res.dataPosition,
+                    webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
                     qrTwinUniqueId8: res.qrTwinUniqueId8,
                     locationLatExt24: res.locationLatExt24,
@@ -4676,6 +4710,9 @@
                         managementExt32: decoded.managementExt32,
                         expiryExt32: decoded.expiryExt32,
                         readerIdExt32: decoded.readerIdExt32,
+                        userIdExt32: decoded.userIdExt32,
+                        dataPosition: decoded.dataPosition,
+                        webDataKind: decoded.webDataKind,
                         readLimitBits: decoded.readLimitBits,
                         qrTwinUniqueId8: decoded.qrTwinUniqueId8,
                         locationLatExt24: decoded.locationLatExt24,
@@ -4987,6 +5024,57 @@
             renderResultText(textId, formatCreationDateTimeExt32(ext32));
         }
 
+        // ★Ver3.1：ユーザーID（拡張管理部の32ビット数値）。
+        //   0 も正当な値なので、未設定（null/undefined）だけを非表示にする。
+        function renderUserIdCard(cardId, textId, ext32) {
+            const card = document.getElementById(cardId);
+            if (!card) return;
+            if (ext32 === undefined || ext32 === null) {
+                card.style.display = 'none';
+                return;
+            }
+            card.style.display = '';
+            renderResultText(textId, String(ext32 >>> 0));
+        }
+
+        // ★Ver3.1：連続データ構成か（1本のデータを複数LQRへ分けて入れている）。
+        //   2領域は dataCompBits 001 / 3領域以上は 101。どちらの値も
+        //   他方の領域数の範囲には現れないので取り違えない。
+        //   旧仕様（2026.08.08）の2領域は 011 だったが、新仕様ではそれが電子署名になる。
+        //   署名の方が優先されるため、旧 011 の連続データは救済しない。
+        function isContinuousDataMgmt(q1Like) {
+            if (!q1Like) return false;
+            const mc32 = (q1Like.managementCode32 !== undefined && q1Like.managementCode32 !== null)
+                ? (q1Like.managementCode32 >>> 0)
+                : getManagementCode32FromParts(q1Like.managementCode, q1Like.managementFlags16);
+            if (mc32 === null || mc32 === undefined) return false;
+            const mgmtInfo = parseStandardMgmt(mc32);
+            if (!mgmtInfo || isDigitalSignMgmt(mgmtInfo) || mgmtInfo.appEncFlag) return false;
+            const raw = (mgmtInfo.dataCompCase !== undefined && mgmtInfo.dataCompCase !== null)
+                ? mgmtInfo.dataCompCase : mgmtInfo.dataCompBits;
+            if (raw === 5) return true;                                   // 3領域以上 ケース2
+            return raw === 1 && mgmtInfo.regionCount === 2;               // 2領域 001
+        }
+
+        // ★Ver3.1：WEBデータID（dataPosition / webDataKind）。
+        //   dataPosition が指すLQRのデータ部は本文ではなくWEBデータIDなので、
+        //   結果カードのラベルをそれと分かるものに差し替える。
+        function applyWebDataLabels(q1Like, label1El, label2El) {
+            const MW = window.QRTwinMgmt48;
+            if (!MW) return;
+            const mc32 = q1Like
+                ? ((q1Like.managementCode32 !== undefined && q1Like.managementCode32 !== null)
+                    ? (q1Like.managementCode32 >>> 0)
+                    : getManagementCode32FromParts(q1Like.managementCode, q1Like.managementFlags16))
+                : null;
+            const mgmtInfo = mc32 === null ? null : parseStandardMgmt(mc32);
+            const webLqr = mgmtInfo ? MW.webDataLqrOf(mgmtInfo.dataPosition) : null;
+            if (!webLqr) return;
+            const kind = MW.webDataKindLabel(mgmtInfo.webDataKind);
+            const el = (webLqr === 1) ? label1El : label2El;
+            if (el) el.innerText = `第${webLqr}QR WEBデータID（${kind}）`;
+        }
+
         function renderImageDataId(containerId, imageId, imageDataId, hasImageDataId) {
             const container = document.getElementById(containerId);
             const image = document.getElementById(imageId);
@@ -5053,6 +5141,9 @@
             // 通常QRは1個で完結するため、第2QRカードは非表示にする
             const card2El = document.getElementById('normalResultCard2');
             if (card2El) card2El.style.display = 'none';
+
+            // 世の中の通常QRには拡張管理部が無いので、ユーザーIDカードは常に閉じる
+            renderUserIdCard('userIdCard', 'userIdText', null);
 
             renderScanDebugStats();
             appendCurrentTrialToLog();
@@ -5154,7 +5245,25 @@
 
                 renderResultText('resText1', firstQR ? firstQR.text : null);
                 renderResultText('resText2', secondQR ? secondQR.text : null);
+
+                // ★Ver3.1：連続データ（2領域＝dataCompBits 001）は1本のデータなので、
+                //   第1QR＋第2QR を結合して1つのカードに出す。
+                if (isContinuousDataMgmt(firstQR)) {
+                    const joined = (firstQR ? (firstQR.text || '') : '') + (secondQR ? (secondQR.text || '') : '');
+                    if (label1El) label1El.innerText = '連続データ（結合）';
+                    renderResultText('resText1', joined);
+                    const card2 = document.getElementById('normalResultCard2');
+                    if (card2) card2.style.display = 'none';
+                }
+
+                // ★Ver3.1：WEBデータIDの領域は、内容がIDなのでラベルを変えて示す。
+                //   読取ソフト自身は取得までは行わず、IDと種別を提示する。
+                applyWebDataLabels(firstQR, label1El, label2El);
             }
+
+            // ユーザーIDは第1QRの拡張管理部に入る（通常モード・電子署名モード共通）
+            renderUserIdCard('userIdCard', 'userIdText',
+                firstQR && firstQR.userIdExt32 !== undefined ? firstQR.userIdExt32 : null);
 
             renderScanDebugStats();
             appendCurrentTrialToLog(); // ★ この試行の計測を蓄積ログへ追記（完了時1回）
@@ -9196,6 +9305,9 @@
                 managementExt32: firstQR.managementExt32,
                 expiryExt32: firstQR.expiryExt32,
                 readerIdExt32: firstQR.readerIdExt32,
+                userIdExt32: firstQR.userIdExt32,
+                dataPosition: firstQR.dataPosition,
+                webDataKind: firstQR.webDataKind,
                 readLimitBits: firstQR.readLimitBits,
                 qrTwinUniqueId8: firstQR.qrTwinUniqueId8,
                 creationDateTimeExt32: firstQR.creationDateTimeExt32,
@@ -9387,10 +9499,15 @@
                 if (!mgmtInfo) return 0;
                 if (isDigitalSignMgmt(mgmtInfo)) return 3;
                 if (mgmtInfo.appEncFlag) return 2;
-                // 連続データ: 2領域は 011 / 3領域以上は 101（どちらも他方の範囲には現れない）
+                // 連続データ: 2領域は 001 / 3領域以上は 101 ★2026.08.09版仕様
+                //   （どちらの値も他方の領域数の範囲には現れないので取り違えない）
                 const raw = (mgmtInfo.dataCompCase !== undefined && mgmtInfo.dataCompCase !== null)
                     ? mgmtInfo.dataCompCase : mgmtInfo.dataCompBits;
-                if (raw === 3 || raw === 5) return 1;
+                if (raw === 5) return 1;
+                if (raw === 1 && regionCount === 2) return 1;
+                // 旧仕様（08.08）で作った2領域の連続データ（011）も読めるようにする。
+                // 新 011 は電子署名だが、そちらは上の isDigitalSignMgmt で先に拾われる。
+                if (raw === 3 && regionCount === 2) return 1;
                 return 0;
             })();
 
@@ -9508,6 +9625,21 @@
             }
             renderResultText('newColorResCombined', combinedText || null);
             renderCreationDateCard('newColorCreationDateCard', 'newColorCreationDateText', creationDateExt32);
+            renderUserIdCard('newColorUserIdCard', 'newColorUserIdText',
+                q1Meta && q1Meta.userIdExt32 !== undefined ? q1Meta.userIdExt32 : null);
+
+            // ★Ver3.1：WEBデータID（2領域構成のみ。単一4色QR 1001 もここを通る）
+            {
+                const MW = window.QRTwinMgmt48;
+                const webLqr = (MW && mgmtInfo) ? MW.webDataLqrOf(mgmtInfo.dataPosition) : null;
+                for (let n = 1; n <= NEW_COLOR_MAX_REGION; n++) {
+                    const lab = document.getElementById('newColorRes' + n + 'Label');
+                    if (!lab) continue;
+                    lab.innerText = (webLqr === n)
+                        ? `第${n}QR WEBデータID（${MW.webDataKindLabel(mgmtInfo.webDataKind)}）`
+                        : `第${n}QR データ`;
+                }
+            }
             renderImageDataId(
                 'newColorImageContainer',
                 'newColorImage',
@@ -9972,6 +10104,9 @@
                                                 managementExt32: _it.managementExt32,
                                                 expiryExt32: _it.expiryExt32,
                                                 readerIdExt32: _it.readerIdExt32,
+                                                userIdExt32: _it.userIdExt32,
+                                                dataPosition: _it.dataPosition,
+                                                webDataKind: _it.webDataKind,
                                                 readLimitBits: _it.readLimitBits,
                                                 qrTwinUniqueId8: _it.qrTwinUniqueId8,
                                                 locationLatExt24: _it.locationLatExt24,
@@ -10020,6 +10155,9 @@
                                                     managementExt32: _it.managementExt32,
                                                     expiryExt32: _it.expiryExt32,
                                                     readerIdExt32: _it.readerIdExt32,
+                                                    userIdExt32: _it.userIdExt32,
+                                                    dataPosition: _it.dataPosition,
+                                                    webDataKind: _it.webDataKind,
                                                     readLimitBits: _it.readLimitBits,
                                                     qrTwinUniqueId8: _it.qrTwinUniqueId8,
                                                     locationLatExt24: _it.locationLatExt24,
@@ -10393,6 +10531,9 @@
                                             managementExt32: cropRes.managementExt32,
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
+                                            userIdExt32: cropRes.userIdExt32,
+                                            dataPosition: cropRes.dataPosition,
+                                            webDataKind: cropRes.webDataKind,
                                             readLimitBits: cropRes.readLimitBits,
                                             qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
                                             locationLatExt24: cropRes.locationLatExt24,
@@ -10471,6 +10612,9 @@
                                             managementExt32: cropRes.managementExt32,
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
+                                            userIdExt32: cropRes.userIdExt32,
+                                            dataPosition: cropRes.dataPosition,
+                                            webDataKind: cropRes.webDataKind,
                                             readLimitBits: cropRes.readLimitBits,
                                             qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
                                             locationLatExt24: cropRes.locationLatExt24,
@@ -10558,6 +10702,9 @@
                                         managementExt32: r.managementExt32,
                                         expiryExt32: r.expiryExt32,
                                         readerIdExt32: r.readerIdExt32,
+                                        userIdExt32: r.userIdExt32,
+                                        dataPosition: r.dataPosition,
+                                        webDataKind: r.webDataKind,
                                         readLimitBits: r.readLimitBits,
                                         qrTwinUniqueId8: r.qrTwinUniqueId8,
                                         locationLatExt24: r.locationLatExt24,
@@ -10638,6 +10785,9 @@
                                     managementExt32: r.managementExt32,
                                     expiryExt32: r.expiryExt32,
                                     readerIdExt32: r.readerIdExt32,
+                                    userIdExt32: r.userIdExt32,
+                                    dataPosition: r.dataPosition,
+                                    webDataKind: r.webDataKind,
                                     readLimitBits: r.readLimitBits,
                                     qrTwinUniqueId8: r.qrTwinUniqueId8,
                                     locationLatExt24: r.locationLatExt24,
@@ -10700,6 +10850,9 @@
                                         managementExt32: resFull.managementExt32,
                                         expiryExt32: resFull.expiryExt32,
                                         readerIdExt32: resFull.readerIdExt32,
+                                        userIdExt32: resFull.userIdExt32,
+                                        dataPosition: resFull.dataPosition,
+                                        webDataKind: resFull.webDataKind,
                                         readLimitBits: resFull.readLimitBits,
                                         qrTwinUniqueId8: resFull.qrTwinUniqueId8,
                                         locationLatExt24: resFull.locationLatExt24,
@@ -10796,6 +10949,9 @@
                                     managementExt32: combined.managementExt32,
                                     expiryExt32: combined.expiryExt32,
                                     readerIdExt32: combined.readerIdExt32,
+                                    userIdExt32: combined.userIdExt32,
+                                    dataPosition: combined.dataPosition,
+                                    webDataKind: combined.webDataKind,
                                     readLimitBits: combined.readLimitBits,
                                     qrTwinUniqueId8: combined.qrTwinUniqueId8,
                                     locationLatExt24: combined.locationLatExt24,
@@ -10885,6 +11041,9 @@
                                         managementExt32: item.managementExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
+                                        userIdExt32: item.userIdExt32,
+                                        dataPosition: item.dataPosition,
+                                        webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,
                                         qrTwinUniqueId8: item.qrTwinUniqueId8,
                                         creationDateTimeExt32: item.creationDateTimeExt32,
@@ -10969,6 +11128,9 @@
                                 managementExt32: item.managementExt32,
                                 expiryExt32: item.expiryExt32,
                                 readerIdExt32: item.readerIdExt32,
+                                userIdExt32: item.userIdExt32,
+                                dataPosition: item.dataPosition,
+                                webDataKind: item.webDataKind,
                                 readLimitBits: item.readLimitBits,
                                 qrTwinUniqueId8: item.qrTwinUniqueId8,
                                 creationDateTimeExt32: item.creationDateTimeExt32,
@@ -11174,6 +11336,9 @@
                                         managementExt32: item.managementExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
+                                        userIdExt32: item.userIdExt32,
+                                        dataPosition: item.dataPosition,
+                                        webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,
                                         qrTwinUniqueId8: item.qrTwinUniqueId8,
                                         creationDateTimeExt32: item.creationDateTimeExt32,

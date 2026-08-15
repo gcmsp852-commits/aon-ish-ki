@@ -560,6 +560,8 @@ function scan(matrix, options) {
                     managementCode32: decoded.managementCode32,
                     managementFlags16: decoded.managementFlags16,
                     managementBits48: decoded.managementBits48,
+                    dataPosition: decoded.dataPosition,
+                    webDataKind: decoded.webDataKind,
                     imageIdExt32: decoded.imageIdExt32,
                     userIdExt32: decoded.userIdExt32,
                     creationDateTimeExt32: decoded.creationDateTimeExt32,
@@ -790,6 +792,8 @@ function buildDirectDecodeResult(decoded, matrix) {
         managementCode32: decoded.managementCode32,
         managementFlags16: decoded.managementFlags16,
         managementBits48: decoded.managementBits48,
+        dataPosition: decoded.dataPosition,
+        webDataKind: decoded.webDataKind,
         imageIdExt32: decoded.imageIdExt32,
         userIdExt32: decoded.userIdExt32,
         creationDateTimeExt32: decoded.creationDateTimeExt32,
@@ -2413,7 +2417,10 @@ var BitStream = /** @class */ (function () {
                 this.bitOffset += numBits;
             }
         }
-        return result;
+        // ★ 32ビットを読むと最上位ビットが符号ビットになり、result が負の数になる
+        //   （例: 0xCAFEBABE → -889275714）。ビット列は常に符号なしなので戻しておく。
+        //   31ビット以下では >>> 0 は何もしないため、他の読み出しには影響しない。
+        return result >>> 0;
     };
     BitStream.prototype.available = function () {
         return 8 * (this.bytes.length - this.byteOffset) - this.bitOffset;

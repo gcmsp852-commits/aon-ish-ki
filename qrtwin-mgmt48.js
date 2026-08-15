@@ -121,9 +121,11 @@
   var DATA_COMP_PLANS = {
     // --- 2領域専用 ---
     "000": { regions: 2, label: "公開＋公開",           roles: [ROLE.PUBLIC, ROLE.PUBLIC],    continuous: null },
-    "001": { regions: 2, label: "公開＋暗号化",         roles: [ROLE.PUBLIC, ROLE.ENCRYPTED], continuous: null },
-    "010": { regions: 2, label: "公開＋電子署名",       roles: [ROLE.PUBLIC, ROLE.SIGNATURE], continuous: null },
-    "011": { regions: 2, label: "公開＋公開（連続）",   roles: [ROLE.PUBLIC, ROLE.PUBLIC],    continuous: "all" },
+    // ★2026.08.09版仕様に合わせて 001/010/011 を入れ替えた。
+    //   旧版（2026.08.08）は 001=暗号化 / 010=電子署名 / 011=連続 だった。
+    "001": { regions: 2, label: "公開＋公開（連続）",   roles: [ROLE.PUBLIC, ROLE.PUBLIC],    continuous: "all" },
+    "010": { regions: 2, label: "公開＋暗号化",         roles: [ROLE.PUBLIC, ROLE.ENCRYPTED], continuous: null },
+    "011": { regions: 2, label: "公開＋電子署名",       roles: [ROLE.PUBLIC, ROLE.SIGNATURE], continuous: null },
     // --- 3領域以上（役割A/B/Cで表現） ---
     "100": { regions: 3, label: "ケース1 独立公開",     roleABC: [ROLE.PUBLIC, ROLE.PUBLIC,    ROLE.PUBLIC],    continuous: null },
     "101": { regions: 3, label: "ケース2 全体連続",     roleABC: [ROLE.PUBLIC, ROLE.PUBLIC,    ROLE.PUBLIC],    continuous: "all" },
@@ -217,7 +219,7 @@
    *   署名は役割C＝最終LQRに入る。埋草領域・付加領域は実データを持たないので
    *   本数に数えない（1000 は実データが第1LQRだけなので署名を載せられない）。
    *
-   *   2領域    → dataCompBits 010「公開＋電子署名」。ユーザ暗号化は併用しない。
+   *   2領域    → dataCompBits 011「公開＋電子署名」。ユーザ暗号化は併用しない。
    *   3領域以上 → 署名を持つのは 111「ケース4」だけで、役割B（第2〜第N-1LQR）が
    *               暗号化される。したがってユーザ暗号化が必須になる。
    *
@@ -245,9 +247,88 @@
       lqrCount: lqrCount,
       signatureLqr: lqrCount,
       requiresEncryption: threeOrMore,
-      dataCompBits: threeOrMore ? "111" : "010",
+      dataCompBits: threeOrMore ? "111" : "011",
       reason: null
     };
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 3-2. WEBデータID（dataPosition / webDataKind）
+   *
+   *   2領域構成に限り、片方のLQRのデータ部を「WEBデータID」にできる。
+   *   読取側はそのIDを使って本体データをWEBから取得する想定で、
+   *   webDataKind は取得される中身の種別を表す。
+   * ------------------------------------------------------------------------- */
+
+  /** dataPosition（2ビット）。添字＝値。webLqr は WEBデータIDを持つLQR番号。 */
+  var DATA_POSITIONS = [
+    { value: 0, label: "シンボル、シンボル",        webLqr: null },
+    { value: 1, label: "シンボル、WEB（データID）", webLqr: 2 },
+    { value: 2, label: "WEB（データID）、シンボル", webLqr: 1 },
+    { value: 3, label: "未定義",                    webLqr: null, undefinedValue: true }
+  ];
+
+  /**
+   * webDataKind（3ビット）。添字＝値。
+   *
+   * ★仕様書（2026.08.08）の表は「010 平文(文字列)」と「010 WEB アドレス」で
+   *   値が重複しており、001 が欠けている。6つの定義値を昇順に並べると
+   *   001＝平文(文字列) となるため、そちらの誤記として扱う。
+   *   仕様が確定したらこの表だけを直せばよい。
+   */
+  var WEB_DATA_KINDS = [
+    { value: 0, label: "WEBデータ無し" },
+    { value: 1, label: "平文(文字列)" },
+    { value: 2, label: "WEBアドレス" },
+    { value: 3, label: "静止画像" },
+    { value: 4, label: "動画" },
+    { value: 5, label: "音声" },
+    { value: 6, label: "未定義", undefinedValue: true },
+    { value: 7, label: "未定義", undefinedValue: true }
+  ];
+
+  function dataPositionLabel(v) {
+    var e = DATA_POSITIONS[v || 0];
+    return e ? e.label : "未定義";
+  }
+  function webDataKindLabel(v) {
+    var e = WEB_DATA_KINDS[v || 0];
+    return e ? e.label : "未定義";
+  }
+  /** dataPosition が指す「WEBデータIDを持つLQR番号」。持たないなら null。 */
+  function webDataLqrOf(dataPosition) {
+    var e = DATA_POSITIONS[dataPosition || 0];
+    return e ? e.webLqr : null;
+  }
+
+  /**
+   * その構成でWEBデータIDを使えるか、使えるならどのLQRに置けるかを返す。
+   *   ・2領域構成に限る（R1）
+   *   ・電子署名のLQRは置き換えられない（R4）
+   * @returns {object} ok / allowedLqrs / reason
+   */
+  function webDataSupport(systemStruBits, dataCompBits) {
+    var st = deriveStructure(systemStruBits);
+    if (!st) return { ok: false, allowedLqrs: [], reason: "systemStruBits が未定義の値です" };
+    if (st.notImplemented) {
+      return { ok: false, allowedLqrs: [], reason: st.label + " は実装対象外です" };
+    }
+    if (st.regionCount !== 2) {
+      return {
+        ok: false, allowedLqrs: [],
+        reason: "WEBデータIDは2領域構成だけで使えます（" + st.label + " は" + st.regionCount + "領域）"
+      };
+    }
+    var plan = resolveLqrPlan(st.bits, dataCompBits);
+    var allowed = [];
+    for (var i = 1; i <= 2; i++) {
+      if (plan && plan.signatureLqr === i) continue;   // R4: 署名のLQRは置き換え不可
+      allowed.push(i);
+    }
+    if (!allowed.length) {
+      return { ok: false, allowedLqrs: [], reason: "置き換えられるLQRがありません" };
+    }
+    return { ok: true, allowedLqrs: allowed, reason: null };
   }
 
   /* ---------------------------------------------------------------------------
@@ -695,6 +776,12 @@
     deriveStructure: deriveStructure,
     resolveLqrPlan: resolveLqrPlan,
     signatureSupport: signatureSupport,
+    DATA_POSITIONS: DATA_POSITIONS,
+    WEB_DATA_KINDS: WEB_DATA_KINDS,
+    dataPositionLabel: dataPositionLabel,
+    webDataKindLabel: webDataKindLabel,
+    webDataLqrOf: webDataLqrOf,
+    webDataSupport: webDataSupport,
     buildMgmt48: buildMgmt48,
     parseMgmt48: parseMgmt48,
     buildMgmtExt: buildMgmtExt,
