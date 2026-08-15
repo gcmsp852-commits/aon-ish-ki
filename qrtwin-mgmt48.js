@@ -211,6 +211,45 @@
     };
   }
 
+  /**
+   * その構造が電子署名を載せられるかを返す。QRツイン・単一QRのどちらも同じ規則。
+   *
+   *   署名は役割C＝最終LQRに入る。埋草領域・付加領域は実データを持たないので
+   *   本数に数えない（1000 は実データが第1LQRだけなので署名を載せられない）。
+   *
+   *   2領域    → dataCompBits 010「公開＋電子署名」。ユーザ暗号化は併用しない。
+   *   3領域以上 → 署名を持つのは 111「ケース4」だけで、役割B（第2〜第N-1LQR）が
+   *               暗号化される。したがってユーザ暗号化が必須になる。
+   *
+   * @returns {object} ok / lqrCount / signatureLqr / requiresEncryption /
+   *                   dataCompBits / reason（ok=false のときだけ理由が入る）
+   */
+  function signatureSupport(systemStruBits) {
+    var st = deriveStructure(systemStruBits);
+    if (!st) return { ok: false, reason: "systemStruBits が未定義の値です" };
+    if (st.notImplemented) {
+      return { ok: false, reason: st.label + " は実装対象外のため電子署名を載せられません" };
+    }
+    var lqrCount = st.lqrToPqr.filter(function (a) {
+      return a && !a.padding && !a.addon;
+    }).length;
+    if (lqrCount < 2) {
+      return {
+        ok: false, lqrCount: lqrCount,
+        reason: st.label + " は実データ領域が1つしかないため電子署名を載せられません"
+      };
+    }
+    var threeOrMore = st.regionCount >= 3;
+    return {
+      ok: true,
+      lqrCount: lqrCount,
+      signatureLqr: lqrCount,
+      requiresEncryption: threeOrMore,
+      dataCompBits: threeOrMore ? "111" : "010",
+      reason: null
+    };
+  }
+
   /* ---------------------------------------------------------------------------
    * 4. 管理部48ビットの組立・解析
    * ------------------------------------------------------------------------- */
@@ -655,6 +694,7 @@
     COLOR_SPEC_ALL8: COLOR_SPEC_ALL8,
     deriveStructure: deriveStructure,
     resolveLqrPlan: resolveLqrPlan,
+    signatureSupport: signatureSupport,
     buildMgmt48: buildMgmt48,
     parseMgmt48: parseMgmt48,
     buildMgmtExt: buildMgmtExt,
