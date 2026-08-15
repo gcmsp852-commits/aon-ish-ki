@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader32</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -9211,22 +9211,25 @@
             };
         }
 
+        // ★Ver3.1：ユーザ暗号化の有無は appEncFlag から直接見る。
+        //   dataCompBits は領域数で意味が変わる（2領域は 001=暗号化、
+        //   3領域以上は 110=ケース3・111=ケース4）ため、単一の尺度に潰すと必ずどこかで破綻する。
+        //   実際、単一4色QR(1001)＋ユーザ暗号化は 2領域の 001 で、
+        //   旧尺度に載せると「連続データ」と解釈され、パスワードを要求せずに
+        //   暗号文のまま結果を表示していた（実機ログで確認）。
         function newColorModeNeedsPassword(mgmtInfo) {
-            return !!(mgmtInfo && (mgmtInfo.dataCompBits === 2 || mgmtInfo.dataCompBits === 3));
+            return !!(mgmtInfo && mgmtInfo.appEncFlag);
         }
 
+        // 暗号化されている領域。役割B＝第2〜第N-1領域（電子署名がある場合）／
+        // 第2〜第N領域（署名が無い場合）。署名領域（役割C）は平文。
         function isNewColorRegionEncrypted(mgmtInfo, regionNo) {
-            if (!mgmtInfo) return false;
-            if (mgmtInfo.dataCompBits === 2) {
-                return regionNo >= 2 && regionNo <= mgmtInfo.regionCount;
-            }
-            if (mgmtInfo.dataCompBits === 3) {
-                // ★Ver3.1：ケース4（暗号化＋電子署名）は役割で決まる。
-                //   役割B＝領域2〜N-1 が暗号、役割C＝領域N が署名（平文）。
-                //   3領域なら領域2、4領域なら領域2・3 が暗号 ＝ 従来の直書きと同じ結果。
-                return regionNo >= 2 && regionNo <= mgmtInfo.regionCount - 1;
-            }
-            return false;
+            if (!mgmtInfo || !mgmtInfo.appEncFlag) return false;
+            if (regionNo < 2) return false;
+            const last = isDigitalSignMgmt(mgmtInfo)
+                ? (mgmtInfo.regionCount - 1)
+                : mgmtInfo.regionCount;
+            return regionNo <= last;
         }
 
         function hasNewColorRegionText(result, regionNo) {
@@ -9273,8 +9276,9 @@
         }
 
         function getNewColorSignatureRegionNo(mgmtInfo) {
-            if (!mgmtInfo || mgmtInfo.dataCompBits !== 3) return null;
-            // ★Ver3.1：署名は役割C＝最終領域。3領域→3 / 4領域→4 / 5領域→5 / 6領域→6
+            // ★Ver3.1：署名の有無も dataCompBits の尺度に頼らず判別する。
+            //   署名は役割C＝最終領域。3領域→3 / 4領域→4 / 5領域→5 / 6領域→6
+            if (!mgmtInfo || !isDigitalSignMgmt(mgmtInfo)) return null;
             return mgmtInfo.regionCount || null;
         }
 
@@ -9376,7 +9380,19 @@
             isScanning = false;
 
             const regionCount = mgmtInfo ? mgmtInfo.regionCount : 3;
-            const dataComp = mgmtInfo ? mgmtInfo.dataCompBits : 0;
+            // ★Ver3.1：データ構成も dataCompBits の尺度に頼らず、明示フラグから決める。
+            //   0=通常 / 1=連続データ / 2=ユーザ暗号化 / 3=暗号化+署名
+            //   （2領域と3領域以上で dataCompBits の意味が違うため）
+            const dataComp = (() => {
+                if (!mgmtInfo) return 0;
+                if (isDigitalSignMgmt(mgmtInfo)) return 3;
+                if (mgmtInfo.appEncFlag) return 2;
+                // 連続データ: 2領域は 011 / 3領域以上は 101（どちらも他方の範囲には現れない）
+                const raw = (mgmtInfo.dataCompCase !== undefined && mgmtInfo.dataCompCase !== null)
+                    ? mgmtInfo.dataCompCase : mgmtInfo.dataCompBits;
+                if (raw === 3 || raw === 5) return 1;
+                return 0;
+            })();
 
             // タイトル更新
             // ★Ver3.1：構成名は systemStruBits から出す。
