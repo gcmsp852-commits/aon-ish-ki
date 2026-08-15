@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader31</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -9123,6 +9123,12 @@
 
         function normalizeNewColorMgmtInfo(mgmtInfo) {
             if (!mgmtInfo) return null;
+            // ★Ver3.1：48ビット管理部では構造(systemStruBits)から領域数が確定するので推測しない。
+            //   旧実装は色数から「4色→3領域 / 8色→4領域」と推測していたが、これは
+            //   「白黒＋カラー」のツインしか無かった頃の前提。単一4色QR(1001)は2領域なのに
+            //   3領域と誤判定し、存在しない第3領域を待ち続けて20秒タイムアウトしていた
+            //   （実機ログ: 第2領域は8フレーム目に decode_success していたのに未完了のまま）。
+            if (mgmtInfo.systemStruBitsStr) return mgmtInfo;
             if (mgmtInfo.regionCount >= 3) return mgmtInfo;
             let regionCount = 2;
             if (mgmtInfo.colorCountBits === 2) regionCount = 3;
