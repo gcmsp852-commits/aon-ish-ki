@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader30</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -8965,7 +8965,14 @@
             const mgmt = q1Data && q1Data.mgmtInfo;
             if (!mgmt) return null;
             const targets = newColorTargetPqrList(mgmt);
-            if (targets.length <= 1) {
+            // ★Ver3.1：対象PQRが1つでも、そのPQR番号は必ず渡す。
+            //   以前は「1つなら従来経路（PQR番号なし）」にしていたが、
+            //   PQR番号を省くと getNewColorDecoder が「色を持つ最後のPQR」を推測する。
+            //   ツイン(0001/0010)は対象が第2PQRなので推測が当たるものの、
+            //   単一QR(1001/1010)は対象が第1PQRのため安全弁に掛かって即座に null を返し、
+            //   「未対応の構成」と記録したまま20秒タイムアウトしていた（実機ログで確認）。
+            //   明示的に渡せば、ツイン側も従来と同じデコーダ・同じ期待位置になる。
+            if (!targets.length) {
                 return processNewColorQRTwin(imageData, width, height, q1Data, existingResult, coordinateOptions);
             }
             let acc = existingResult;
