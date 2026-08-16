@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader37</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2884,6 +2884,7 @@
                 expiryExt32: res.expiryExt32,
                 readerIdExt32: res.readerIdExt32,
                 userIdExt32: res.userIdExt32,
+                webDataIdExt32: res.webDataIdExt32,
                 dataPosition: res.dataPosition,
                 webDataKind: res.webDataKind,
                 readLimitBits: res.readLimitBits,
@@ -3458,6 +3459,7 @@
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
+                    webDataIdExt32: res.webDataIdExt32,
                     dataPosition: res.dataPosition,
                     webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
@@ -3808,6 +3810,7 @@
                             expiryExt32: _comb.expiryExt32,
                             readerIdExt32: _comb.readerIdExt32,
                             userIdExt32: _comb.userIdExt32,
+                            webDataIdExt32: _comb.webDataIdExt32,
                             dataPosition: _comb.dataPosition,
                             webDataKind: _comb.webDataKind,
                             readLimitBits: _comb.readLimitBits,
@@ -4667,6 +4670,7 @@
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
+                    webDataIdExt32: res.webDataIdExt32,
                     dataPosition: res.dataPosition,
                     webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
@@ -4711,6 +4715,7 @@
                         expiryExt32: decoded.expiryExt32,
                         readerIdExt32: decoded.readerIdExt32,
                         userIdExt32: decoded.userIdExt32,
+                        webDataIdExt32: decoded.webDataIdExt32,
                         dataPosition: decoded.dataPosition,
                         webDataKind: decoded.webDataKind,
                         readLimitBits: decoded.readLimitBits,
@@ -5026,6 +5031,8 @@
 
         // ★Ver3.1：ユーザーID（拡張管理部の32ビット数値）。
         //   0 も正当な値なので、未設定（null/undefined）だけを非表示にする。
+        //   仕様書 7. のとおり 国ID＋個別ID に分解して示す。
+        //   未割当の国IDなら数値のみを出す（誤った国名を出さない）。
         function renderUserIdCard(cardId, textId, ext32) {
             const card = document.getElementById(cardId);
             if (!card) return;
@@ -5034,7 +5041,99 @@
                 return;
             }
             card.style.display = '';
-            renderResultText(textId, String(ext32 >>> 0));
+            const v = ext32 >>> 0;
+            const M = window.QRTwinMgmt48;
+            const p = M && typeof M.parseUserId === 'function' ? M.parseUserId(v) : null;
+            renderResultText(textId, p
+                ? `${v}（${p.countryName}　国ID ${p.countryCode} ＋ 個別ID ${p.individualId}）`
+                : `${v}（国IDが未割当）`);
+        }
+
+        // ★Ver3.1：システムパスワード（仕様書で決め打ちされた固定パスワード）。
+        //   鍵ストリームの作り方はユーザ暗号化と同じ連鎖ハッシュ。
+        async function deriveSystemPasswordMaskAsync(neededBytes) {
+            const M = window.QRTwinMgmt48;
+            return deriveEncryptionMaskBytesAsync(M ? M.SYSTEM_PASSWORD : 'systempassword', neededBytes);
+        }
+        async function derivePaddingPasswordMaskAsync(neededBytes) {
+            const M = window.QRTwinMgmt48;
+            return deriveEncryptionMaskBytesAsync(M ? M.PADDING_PASSWORD : 'paddingpassword', neededBytes);
+        }
+
+        /**
+         * ★Ver3.1：WEBから取得したデータを復号する（仕様書 5. データ所在）。
+         *   ・ユーザ暗号化が指定されていれば、その指定パスワード
+         *   ・そうでなくシステム暗号化が指定されていれば systempassword
+         *   ・どちらでもなければ平文
+         *   WEBからの取得そのものはアプリ層の担当。ここは復号だけを担う。
+         * @param {Uint8Array|Array} bytes WEBから取得した本文（暗号化されている場合がある）
+         * @param {object} mgmtInfo 第1QRの管理部
+         * @param {string} appEncPassword ユーザ暗号化のパスワード（あれば）
+         * @returns {object} kind / bytes（復号後）/ text
+         */
+        async function decryptWebPayload(bytes, mgmtInfo, appEncPassword) {
+            const M = window.QRTwinMgmt48;
+            const src = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
+            if (!M) return { kind: 'none', bytes: src, text: new TextDecoder().decode(src) };
+            const spec = M.webDataMaskSpec(mgmtInfo, appEncPassword);
+            if (spec.kind === 'none' || !spec.password) {
+                return { kind: spec.kind, bytes: src, text: new TextDecoder().decode(src) };
+            }
+            const mask = await deriveEncryptionMaskBytesAsync(spec.password, Math.max(1, src.length));
+            const out = M.xorWithMask(src, mask);
+            const u8 = out instanceof Uint8Array ? out : Uint8Array.from(out);
+            return { kind: spec.kind, bytes: u8, text: new TextDecoder().decode(u8) };
+        }
+
+        /**
+         * 埋め草領域拡張から取り出したデータの復号（仕様書 8.）。
+         * 5. のWEBデータと違い、鍵は常に固定の paddingpassword。
+         */
+        async function decryptPaddingPayload(bytes, mgmtInfo) {
+            const M = window.QRTwinMgmt48;
+            const src = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
+            if (!M) return { kind: 'none', bytes: src };
+            const spec = M.paddingMaskSpec(mgmtInfo);
+            if (spec.kind === 'none' || !spec.password) return { kind: spec.kind, bytes: src };
+            const mask = await deriveEncryptionMaskBytesAsync(spec.password, Math.max(1, src.length));
+            const out = M.xorWithMask(src, mask);
+            return { kind: spec.kind, bytes: out instanceof Uint8Array ? out : Uint8Array.from(out) };
+        }
+
+        /**
+         * ★Ver3.1：埋め草領域拡張（仕様書 8.）。
+         *   片方のLQRの埋め草に、もう片方の余りデータが入っている。
+         *   収容元のLQRは本文の前半しか持たないので、拡張データ部を復号して後ろへ繋ぐ。
+         *   ・paddingExt 01 … 第2LQRが第1LQRの余りを持つ
+         *   ・paddingExt 10 … 第1LQRが第2LQRの余りを持つ
+         *   ・収容元が暗号化されていれば paddingpassword で暗号化されている
+         * @returns {object|null} { sourceLqr, holderLqr, text } / 拡張が無ければ null
+         */
+        async function resolvePaddingExt(firstQR, secondQR) {
+            const M = window.QRTwinMgmt48;
+            if (!M || !firstQR) return null;
+            const mc32 = (firstQR.managementCode32 !== undefined && firstQR.managementCode32 !== null)
+                ? (firstQR.managementCode32 >>> 0)
+                : getManagementCode32FromParts(firstQR.managementCode, firstQR.managementFlags16);
+            if (mc32 === null || mc32 === undefined) return null;
+            const mgmtInfo = parseStandardMgmt(mc32);
+            const pe = mgmtInfo ? (mgmtInfo.paddingExt || 0) : 0;
+            const sourceLqr = M.paddingExtSourceLqr(pe);
+            const holderLqr = M.paddingExtHolderLqr(pe);
+            if (!sourceLqr || !holderLqr) return null;
+            // 拡張データ部は収容先のLQRが持っている
+            const holder = (holderLqr === 1) ? firstQR : secondQR;
+            const raw = holder && holder.paddingExtBytes;
+            if (!raw || !raw.length) return null;
+            // 収容元が暗号化されていれば paddingpassword で戻す
+            const spec = M.paddingMaskSpec(mgmtInfo);
+            let bytes = Uint8Array.from(raw);
+            if (spec.kind !== 'none') {
+                const mask = await deriveEncryptionMaskBytesAsync(spec.password, Math.max(1, bytes.length));
+                const out = M.xorWithMask(bytes, mask);
+                bytes = out instanceof Uint8Array ? out : Uint8Array.from(out);
+            }
+            return { sourceLqr, holderLqr, text: new TextDecoder().decode(bytes) };
         }
 
         // ★Ver3.1：連続データ構成か（1本のデータを複数LQRへ分けて入れている）。
@@ -5056,23 +5155,39 @@
             return raw === 1 && mgmtInfo.regionCount === 2;               // 2領域 001
         }
 
-        // ★Ver3.1：WEBデータID（dataPosition / webDataKind）。
-        //   dataPosition が指すLQRのデータ部は本文ではなくWEBデータIDなので、
-        //   結果カードのラベルをそれと分かるものに差し替える。
-        function applyWebDataLabels(q1Like, label1El, label2El) {
+        // ★Ver3.1：WEBデータID（dataPosition / webDataKind / 拡張管理部の32ビットID）。
+        //   dataPosition が指すLQRのデータはWEB上にあり、シンボル側は空。
+        //   本文カードの代わりに「WEB上にある」ことと32ビットのデータIDを示す。
+        //   データIDの内訳は ユーザID26ビット＋個別データID6ビット。
+        function getWebDataInfo(q1Like) {
             const MW = window.QRTwinMgmt48;
-            if (!MW) return;
-            const mc32 = q1Like
-                ? ((q1Like.managementCode32 !== undefined && q1Like.managementCode32 !== null)
-                    ? (q1Like.managementCode32 >>> 0)
-                    : getManagementCode32FromParts(q1Like.managementCode, q1Like.managementFlags16))
-                : null;
-            const mgmtInfo = mc32 === null ? null : parseStandardMgmt(mc32);
+            if (!MW || !q1Like) return null;
+            const mc32 = (q1Like.managementCode32 !== undefined && q1Like.managementCode32 !== null)
+                ? (q1Like.managementCode32 >>> 0)
+                : getManagementCode32FromParts(q1Like.managementCode, q1Like.managementFlags16);
+            if (mc32 === null || mc32 === undefined) return null;
+            const mgmtInfo = parseStandardMgmt(mc32);
             const webLqr = mgmtInfo ? MW.webDataLqrOf(mgmtInfo.dataPosition) : null;
-            if (!webLqr) return;
-            const kind = MW.webDataKindLabel(mgmtInfo.webDataKind);
-            const el = (webLqr === 1) ? label1El : label2El;
-            if (el) el.innerText = `第${webLqr}QR WEBデータID（${kind}）`;
+            if (!webLqr) return null;
+            const id32 = q1Like.webDataIdExt32;
+            return {
+                webLqr,
+                kind: MW.webDataKindLabel(mgmtInfo.webDataKind),
+                id32: (id32 === undefined || id32 === null) ? null : (id32 >>> 0),
+                parts: (id32 === undefined || id32 === null) ? null : MW.parseWebDataId(id32)
+            };
+        }
+
+        function applyWebDataLabels(q1Like, label1El, label2El) {
+            const info = getWebDataInfo(q1Like);
+            if (!info) return;
+            const el = (info.webLqr === 1) ? label1El : label2El;
+            if (el) el.innerText = `第${info.webLqr}LQR データはWEB上（${info.kind}）`;
+            // シンボル側は空なので、代わりにデータIDを本文欄へ出す
+            const textId = (info.webLqr === 1) ? 'resText1' : 'resText2';
+            renderResultText(textId, info.parts
+                ? `データID ${info.id32}（ユーザID ${info.parts.userId} ＋ 個別データID ${info.parts.itemId}）`
+                : 'データIDが読み取れませんでした');
         }
 
         function renderImageDataId(containerId, imageId, imageDataId, hasImageDataId) {
@@ -5245,6 +5360,18 @@
 
                 renderResultText('resText1', firstQR ? firstQR.text : null);
                 renderResultText('resText2', secondQR ? secondQR.text : null);
+
+                // ★Ver3.1：埋め草領域拡張。収容元のLQRは本文の前半しか持たないので、
+                //   相手の埋め草にある余りを復号して繋ぎ直す（表示は非同期で差し替える）。
+                resolvePaddingExt(firstQR, secondQR).then(ext => {
+                    if (!ext) return;
+                    const el = (ext.sourceLqr === 1) ? label1El : label2El;
+                    const textId = (ext.sourceLqr === 1) ? 'resText1' : 'resText2';
+                    const base = (ext.sourceLqr === 1)
+                        ? (firstQR ? firstQR.text : '') : (secondQR ? secondQR.text : '');
+                    renderResultText(textId, (base || '') + ext.text);
+                    if (el) el.innerText = `第${ext.sourceLqr}LQR（第${ext.holderLqr}LQRの埋め草から復元）`;
+                }).catch(() => {});
 
                 // ★Ver3.1：連続データ（2領域＝dataCompBits 001）は1本のデータなので、
                 //   第1QR＋第2QR を結合して1つのカードに出す。
@@ -8790,6 +8917,11 @@
                 const loc = locInfo && locInfo.location;
                 return {
                     ...(baseOptions || {}),
+                    // ★Ver3.1：同一データ4色QRの第2LQR（仕様書 6.2）。
+                    //   生成側はデータ部のビット列を逆順にしてから誤り訂正データを作るので、
+                    //   RS訂正後のデータ部を元の並びへ戻してから解釈する。
+                    //   セル配置の逆転は restoreReversedPlaneMatrix で戻し済み。
+                    reverseDataBits: !!(needsPlaneReorder && regionNo === 2),
                     // 非暗号化領域のみ: 別領域として復号成功した結果も受け取り、正しいスロットへ回す
                     acceptCrossRegion: !baseOptions,
                     probePhase: 'newColor matrix-located Q' + regionNo,
@@ -9306,6 +9438,7 @@
                 expiryExt32: firstQR.expiryExt32,
                 readerIdExt32: firstQR.readerIdExt32,
                 userIdExt32: firstQR.userIdExt32,
+                webDataIdExt32: firstQR.webDataIdExt32,
                 dataPosition: firstQR.dataPosition,
                 webDataKind: firstQR.webDataKind,
                 readLimitBits: firstQR.readLimitBits,
@@ -9632,12 +9765,21 @@
             {
                 const MW = window.QRTwinMgmt48;
                 const webLqr = (MW && mgmtInfo) ? MW.webDataLqrOf(mgmtInfo.dataPosition) : null;
+                const id32 = (q1Meta && q1Meta.webDataIdExt32 !== undefined && q1Meta.webDataIdExt32 !== null)
+                    ? (q1Meta.webDataIdExt32 >>> 0) : null;
+                const parts = (MW && id32 !== null) ? MW.parseWebDataId(id32) : null;
                 for (let n = 1; n <= NEW_COLOR_MAX_REGION; n++) {
                     const lab = document.getElementById('newColorRes' + n + 'Label');
                     if (!lab) continue;
                     lab.innerText = (webLqr === n)
-                        ? `第${n}QR WEBデータID（${MW.webDataKindLabel(mgmtInfo.webDataKind)}）`
-                        : `第${n}QR データ`;
+                        ? `第${n}LQR データはWEB上（${MW.webDataKindLabel(mgmtInfo.webDataKind)}）`
+                        : `第${n}LQR データ`;
+                    // WEB側の領域はシンボルが空なので、代わりにデータIDを出す
+                    if (webLqr === n) {
+                        renderResultText('newColorRes' + n, parts
+                            ? `データID ${id32}（ユーザID ${parts.userId} ＋ 個別データID ${parts.itemId}）`
+                            : 'データIDが読み取れませんでした');
+                    }
                 }
             }
             renderImageDataId(
@@ -10105,6 +10247,7 @@
                                                 expiryExt32: _it.expiryExt32,
                                                 readerIdExt32: _it.readerIdExt32,
                                                 userIdExt32: _it.userIdExt32,
+                                                webDataIdExt32: _it.webDataIdExt32,
                                                 dataPosition: _it.dataPosition,
                                                 webDataKind: _it.webDataKind,
                                                 readLimitBits: _it.readLimitBits,
@@ -10156,6 +10299,7 @@
                                                     expiryExt32: _it.expiryExt32,
                                                     readerIdExt32: _it.readerIdExt32,
                                                     userIdExt32: _it.userIdExt32,
+                                                    webDataIdExt32: _it.webDataIdExt32,
                                                     dataPosition: _it.dataPosition,
                                                     webDataKind: _it.webDataKind,
                                                     readLimitBits: _it.readLimitBits,
@@ -10532,6 +10676,7 @@
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
                                             userIdExt32: cropRes.userIdExt32,
+                                            webDataIdExt32: cropRes.webDataIdExt32,
                                             dataPosition: cropRes.dataPosition,
                                             webDataKind: cropRes.webDataKind,
                                             readLimitBits: cropRes.readLimitBits,
@@ -10613,6 +10758,7 @@
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
                                             userIdExt32: cropRes.userIdExt32,
+                                            webDataIdExt32: cropRes.webDataIdExt32,
                                             dataPosition: cropRes.dataPosition,
                                             webDataKind: cropRes.webDataKind,
                                             readLimitBits: cropRes.readLimitBits,
@@ -10703,6 +10849,7 @@
                                         expiryExt32: r.expiryExt32,
                                         readerIdExt32: r.readerIdExt32,
                                         userIdExt32: r.userIdExt32,
+                                        webDataIdExt32: r.webDataIdExt32,
                                         dataPosition: r.dataPosition,
                                         webDataKind: r.webDataKind,
                                         readLimitBits: r.readLimitBits,
@@ -10786,6 +10933,7 @@
                                     expiryExt32: r.expiryExt32,
                                     readerIdExt32: r.readerIdExt32,
                                     userIdExt32: r.userIdExt32,
+                                    webDataIdExt32: r.webDataIdExt32,
                                     dataPosition: r.dataPosition,
                                     webDataKind: r.webDataKind,
                                     readLimitBits: r.readLimitBits,
@@ -10851,6 +10999,7 @@
                                         expiryExt32: resFull.expiryExt32,
                                         readerIdExt32: resFull.readerIdExt32,
                                         userIdExt32: resFull.userIdExt32,
+                                        webDataIdExt32: resFull.webDataIdExt32,
                                         dataPosition: resFull.dataPosition,
                                         webDataKind: resFull.webDataKind,
                                         readLimitBits: resFull.readLimitBits,
@@ -10950,6 +11099,7 @@
                                     expiryExt32: combined.expiryExt32,
                                     readerIdExt32: combined.readerIdExt32,
                                     userIdExt32: combined.userIdExt32,
+                                    webDataIdExt32: combined.webDataIdExt32,
                                     dataPosition: combined.dataPosition,
                                     webDataKind: combined.webDataKind,
                                     readLimitBits: combined.readLimitBits,
@@ -11042,6 +11192,7 @@
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
+                                        webDataIdExt32: item.webDataIdExt32,
                                         dataPosition: item.dataPosition,
                                         webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,
@@ -11129,6 +11280,7 @@
                                 expiryExt32: item.expiryExt32,
                                 readerIdExt32: item.readerIdExt32,
                                 userIdExt32: item.userIdExt32,
+                                webDataIdExt32: item.webDataIdExt32,
                                 dataPosition: item.dataPosition,
                                 webDataKind: item.webDataKind,
                                 readLimitBits: item.readLimitBits,
@@ -11337,6 +11489,7 @@
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
+                                        webDataIdExt32: item.webDataIdExt32,
                                         dataPosition: item.dataPosition,
                                         webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,

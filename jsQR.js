@@ -561,6 +561,9 @@ function scan(matrix, options) {
                     managementFlags16: decoded.managementFlags16,
                     managementBits48: decoded.managementBits48,
                     dataPosition: decoded.dataPosition,
+                    webDataIdExt32: decoded.webDataIdExt32,
+                    paddingExt: decoded.paddingExt,
+                    paddingExtBytes: decoded.paddingExtBytes,
                     webDataKind: decoded.webDataKind,
                     imageIdExt32: decoded.imageIdExt32,
                     userIdExt32: decoded.userIdExt32,
@@ -629,6 +632,7 @@ function jsQR(data, width, height, providedOptions) {
     var options = {
         inversionAttempts: providedOptions.inversionAttempts || defaultOptions.inversionAttempts,
         appEncMask: providedOptions.appEncMask,
+        reverseDataBits: providedOptions.reverseDataBits,
         extractRawOnly: providedOptions.extractRawOnly,
         multi: providedOptions.multi,
         extractRawForFailed: providedOptions.extractRawForFailed,
@@ -793,6 +797,9 @@ function buildDirectDecodeResult(decoded, matrix) {
         managementFlags16: decoded.managementFlags16,
         managementBits48: decoded.managementBits48,
         dataPosition: decoded.dataPosition,
+        webDataIdExt32: decoded.webDataIdExt32,
+        paddingExt: decoded.paddingExt,
+        paddingExtBytes: decoded.paddingExtBytes,
         webDataKind: decoded.webDataKind,
         imageIdExt32: decoded.imageIdExt32,
         userIdExt32: decoded.userIdExt32,
@@ -1646,6 +1653,22 @@ function decodeMatrix(matrix, options) {
                 decodeBytes[di] = resultBytes[di] ^ (appEncMask[di] & 0xFF);
             }
         }
+        // ★同一データ4色QRの第2LQR（仕様書 6.2）。
+        //   生成側は「データ部のビット列を逆順にしてから RS ECC を作る」ので、
+        //   RS訂正で得られたデータ部を元の並びへ戻してから解釈する。
+        //   セル配置の逆転（ステップ3〜4）は呼び出し側が戻してから渡してくる。
+        if (options && options.reverseDataBits) {
+            var rn = decodeBytes.length;
+            var rout = new Uint8ClampedArray(rn);
+            for (var rbi = 0; rbi < rn; rbi++) {
+                var rbv = decodeBytes[rn - 1 - rbi] & 0xFF;
+                rbv = ((rbv & 0xF0) >> 4) | ((rbv & 0x0F) << 4);
+                rbv = ((rbv & 0xCC) >> 2) | ((rbv & 0x33) << 2);
+                rbv = ((rbv & 0xAA) >> 1) | ((rbv & 0x55) << 1);
+                rout[rbi] = rbv & 0xFF;
+            }
+            decodeBytes = rout;
+        }
         var res = decodeData_1.decode(decodeBytes, version.versionNumber);
         pushDebugProbe(options, "decode_success", {
             stage: "decode_success",
@@ -2273,10 +2296,16 @@ function decode(data, version) {
                 result.paddingExt = seg(44, 2);
                 // --- 拡張管理部 ---
                 var hasUniqueId = result.readLimitBits !== 0;
-                var extBitsNeeded = (hasDateTime ? 32 : 0) + (hasExpiry ? 32 : 0) + (hasReaderId ? 32 : 0)
+                // ★WEBデータID（32ビット）。dataPosition が 00 以外のときだけ入る。
+                //   拡張管理部は管理部のビット位置が早い順なので、dataPosition(27) は
+                //   hasDateTime(35) より前＝拡張管理部の先頭に来る。
+                var hasWebDataId = result.dataPosition !== 0;
+                var extBitsNeeded = (hasWebDataId ? 32 : 0)
+                    + (hasDateTime ? 32 : 0) + (hasExpiry ? 32 : 0) + (hasReaderId ? 32 : 0)
                     + (hasImageId ? 32 : 0) + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0)
                     + (hasUniqueId ? 8 : 0) + (userIdBit ? 32 : 0);
                 if (extBitsNeeded > 0 && stream.available() >= extBitsNeeded) {
+                    if (hasWebDataId) result.webDataIdExt32 = stream.readBits(32);
                     if (hasDateTime) result.creationDateTimeExt32 = stream.readBits(32);
                     if (hasExpiry) result.expiryExt32 = stream.readBits(32);
                     if (hasReaderId) result.readerIdExt32 = stream.readBits(32);
@@ -2291,6 +2320,21 @@ function decode(data, version) {
                 }
                 // 後ろの終端4ビット(0000)を読み飛ばす
                 if (stream.available() >= 4) stream.readBits(4);
+                // ★埋め草領域拡張（仕様書 8.）。
+                //   paddingExt が 01/10 のとき、片方のLQRの埋め草の手前に
+                //   「長さ16ビット＋本体」で相手の余りデータが入っている。
+                //   自分がその収容先かどうかは qrNo で判る（01→第2LQR / 10→第1LQR）。
+                var padHolder = (result.paddingExt === 1) ? 1 : (result.paddingExt === 2 ? 0 : -1);
+                if (padHolder >= 0 && result.qrNo === padHolder && stream.available() >= 16) {
+                    var padLen = stream.readBits(16);
+                    if (padLen > 0 && stream.available() >= padLen * 8) {
+                        var padBytes = new Array(padLen);
+                        for (var pbi = 0; pbi < padLen; pbi++) padBytes[pbi] = stream.readBits(8) & 0xFF;
+                        result.paddingExtBytes = padBytes;
+                    } else if (padLen === 0) {
+                        result.paddingExtBytes = [];
+                    }
+                }
             }
             return result;
             // ★ ここまで書き換え！ ★

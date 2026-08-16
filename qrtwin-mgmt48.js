@@ -302,6 +302,36 @@
   }
 
   /**
+   * WEBデータID（32ビット）の内訳。
+   *   上位26ビット＝ユーザID ／ 下位6ビット＝個別データID
+   * 仕様書（2026.08.09）5. データ所在「データIDの構成 ユーザID＋個別データID」より。
+   */
+  var WEB_DATA_ID_USER_BITS = 26;
+  var WEB_DATA_ID_ITEM_BITS = 6;
+  var WEB_DATA_ID_USER_MAX = Math.pow(2, WEB_DATA_ID_USER_BITS) - 1;  // 67108863
+  var WEB_DATA_ID_ITEM_MAX = Math.pow(2, WEB_DATA_ID_ITEM_BITS) - 1;  // 63
+
+  /** ユーザID(26bit) と 個別データID(6bit) から32ビットのWEBデータIDを組み立てる */
+  function composeWebDataId(userId26, itemId6) {
+    var u = Number(userId26) || 0;
+    var i = Number(itemId6) || 0;
+    if (u < 0 || u > WEB_DATA_ID_USER_MAX) return null;
+    if (i < 0 || i > WEB_DATA_ID_ITEM_MAX) return null;
+    // 26ビット左シフトは 32ビット符号付き演算で溢れるため、乗算で組み立てる
+    return ((u * Math.pow(2, WEB_DATA_ID_ITEM_BITS)) + i) >>> 0;
+  }
+
+  /** 32ビットのWEBデータIDを ユーザID / 個別データID へ分解する */
+  function parseWebDataId(value32) {
+    var v = (Number(value32) || 0) >>> 0;
+    return {
+      userId: Math.floor(v / Math.pow(2, WEB_DATA_ID_ITEM_BITS)),
+      itemId: v % Math.pow(2, WEB_DATA_ID_ITEM_BITS),
+      value: v
+    };
+  }
+
+  /**
    * その構成でWEBデータIDを使えるか、使えるならどのLQRに置けるかを返す。
    *   ・2領域構成に限る（R1）
    *   ・電子署名のLQRは置き換えられない（R4）
@@ -404,6 +434,10 @@
    *    長さフィールドは持たない（フラグを見れば構成が確定するため）。
    * ------------------------------------------------------------------------- */
   var EXT_ITEMS = [
+    // ★WEBデータID（32ビット）。dataPosition が 00 以外のときだけ入る。
+    //   拡張管理部は「管理部のビット位置が早い順」に並べる規則なので、
+    //   dataPosition(27) は hasDateTime(35) より前＝拡張管理部の先頭に来る。
+    { key: "webDataId",        width: 32, when: function (m) { return (m.dataPosition || 0) !== 0; } },
     { key: "creationDateTime", width: 32, when: function (m) { return !!m.hasDateTime; } },
     { key: "expiry",           width: 32, when: function (m) { return !!m.hasExpiry; } },
     { key: "readerId",         width: 32, when: function (m) { return !!m.hasReaderId; } },
@@ -727,6 +761,208 @@
     return 7;
   }
 
+  /* ---------------------------------------------------------------------------
+   * ユーザID（32ビット）の国別構成
+   *
+   *   仕様書（2026.08.09）7. ユーザID より。
+   *     ユーザID32ビット ＝ 国ID（4〜8ビット）＋ 個別ID（24〜28ビット）
+   *
+   *   国IDは可変長なので、頭部一致で一意に切り出せる必要がある（接尾符号）。
+   *   下表がその条件を満たしていることは検証で確かめている。
+   *
+   *   ★米国は仕様書の表では「国ID 00001（5ビット）／個別ID 28ビット」で
+   *     合計33ビットになり32ビットに収まらない。件数の「1.3億」は 2^27 に一致する
+   *     （2^28 は2.6億）ので、個別IDは27ビットの誤記として扱う。
+   * ------------------------------------------------------------------------- */
+  var USER_ID_BITS = 32;
+  var USER_ID_COUNTRIES = [
+    { name: "日本",         code: "00000",  individualBits: 27 },
+    { name: "米国",         code: "00001",  individualBits: 27 },   // ★表は28ビット（誤記）
+    { name: "インドネシア", code: "0001",   individualBits: 28 },
+    { name: "中国",         code: "001",    individualBits: 29 },
+    { name: "インド",       code: "010",    individualBits: 29 },
+    { name: "台湾",         code: "100001", individualBits: 26 },
+    { name: "ベトナム",     code: "100010", individualBits: 26 },
+    { name: "韓国",         code: "100011", individualBits: 26 }
+  ];
+
+  function userIdCountryByName(name) {
+    for (var i = 0; i < USER_ID_COUNTRIES.length; i++) {
+      if (USER_ID_COUNTRIES[i].name === name) return USER_ID_COUNTRIES[i];
+    }
+    return null;
+  }
+  function userIdCountryByCode(code) {
+    for (var i = 0; i < USER_ID_COUNTRIES.length; i++) {
+      if (USER_ID_COUNTRIES[i].code === code) return USER_ID_COUNTRIES[i];
+    }
+    return null;
+  }
+  /** その国で使える個別IDの最大値 */
+  function userIdIndividualMax(country) {
+    if (!country) return 0;
+    return Math.pow(2, country.individualBits) - 1;
+  }
+
+  /**
+   * 国名（または国IDのビット列）と個別IDから32ビットのユーザIDを組み立てる。
+   * @returns {number|null} 範囲外なら null
+   */
+  function composeUserId(countryNameOrCode, individualId) {
+    var c = userIdCountryByName(countryNameOrCode) || userIdCountryByCode(countryNameOrCode);
+    if (!c) return null;
+    var v = Number(individualId);
+    if (!isFinite(v) || v < 0 || v > userIdIndividualMax(c)) return null;
+    // 国IDを個別IDのビット数ぶん上位へ置く。32ビット左シフトは符号付き演算で
+    // 溢れるため、乗算で組み立てる。
+    var prefix = parseInt(c.code, 2);
+    return ((prefix * Math.pow(2, c.individualBits)) + v) >>> 0;
+  }
+
+  /**
+   * 32ビットのユーザIDを 国 / 個別ID へ分解する。
+   * 国IDは可変長なので、上位ビットから順に一致する国を探す（接尾符号）。
+   * @returns {object|null} 未割当の国IDなら null
+   */
+  function parseUserId(value32) {
+    var v = (Number(value32) || 0) >>> 0;
+    var bits = "";
+    for (var b = USER_ID_BITS - 1; b >= 0; b--) {
+      bits += (Math.floor(v / Math.pow(2, b)) % 2) ? "1" : "0";
+    }
+    for (var i = 0; i < USER_ID_COUNTRIES.length; i++) {
+      var c = USER_ID_COUNTRIES[i];
+      if (bits.slice(0, c.code.length) !== c.code) continue;
+      return {
+        country: c,
+        countryName: c.name,
+        countryCode: c.code,
+        individualId: parseInt(bits.slice(c.code.length), 2),
+        value: v
+      };
+    }
+    return null;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * システムパスワード
+   *
+   *   仕様書（2026.08.09）で決め打ちされている固定パスワード。
+   *   どちらも「SHA256でハッシュ値を生成し、それを鍵ストリームとしてXOR」する。
+   *   鍵ストリームの伸ばし方は既存のユーザ暗号化と同じ連鎖ハッシュ
+   *   （h0 = SHA256(入力) / h1 = SHA256(h0) / … を必要バイト数ぶん連結）。
+   *
+   *   ・systempassword  … 5. データ所在
+   *       「システム暗号化が指定される場合は、システムパスワードで暗号化した
+   *         結果がWEBに記録される」
+   *   ・paddingpassword … 8. 埋め草領域拡張
+   *       「大量データ側が暗号化されている場合には、5.のWEBデータ記憶と同様に
+   *         暗号化後、収容する」
+   * ------------------------------------------------------------------------- */
+  var SYSTEM_PASSWORD  = "systempassword";
+  var PADDING_PASSWORD = "paddingpassword";
+
+  /**
+   * WEBへ記録するデータをどの鍵で暗号化するかを決める。
+   *   ・ユーザ暗号化が指定されていれば、その指定パスワード
+   *     （QRツインに収容する場合と同じ。システム暗号化は行わない）
+   *   ・そうでなくシステム暗号化が指定されていれば systempassword
+   *   ・どちらでもなければ暗号化しない
+   * @returns {object} kind: "app"|"system"|"none" / password（none のときは null）
+   */
+  function webDataMaskSpec(mgmt, appEncPassword) {
+    if (mgmt && mgmt.appEncFlag) {
+      return { kind: "app", password: appEncPassword || null };
+    }
+    if (mgmt && mgmt.sysEncFlag) {
+      return { kind: "system", password: SYSTEM_PASSWORD };
+    }
+    return { kind: "none", password: null };
+  }
+
+  /**
+   * 埋め草領域拡張へ収容するデータの鍵。
+   *   仕様書 8.「大量データ側が暗号化されている場合には、5.のWEBデータ記憶と同様に
+   *   暗号化後、収容する。システムパスワード『paddingpassword』とする。」
+   *   ＝ 収容元が暗号化されているときだけ、固定の paddingpassword で暗号化する。
+   *   （5. と違い、ユーザ指定パスワードは使わない。仕様書が固定値を明示しているため）
+   * @param {object} mgmt 収容元LQRの管理部
+   */
+  function paddingMaskSpec(mgmt) {
+    var encrypted = !!(mgmt && (mgmt.appEncFlag || mgmt.sysEncFlag));
+    return encrypted
+      ? { kind: "padding", password: PADDING_PASSWORD }
+      : { kind: "none", password: null };
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 埋め草領域拡張（paddingExt）の格納書式
+   *
+   *   仕様書 8. は「どちらのLQRへ収容するか」しか定めておらず、収容した長さを
+   *   読取側へ伝える手段が無い。そこで拡張データ部の先頭に16ビットの長さを置く。
+   *
+   *     拡張データ部 = 長さ16ビット（バイト数, ビッグエンディアン） + 本体バイト列
+   *
+   *   位置は管理部（拡張管理部と終端4ビットを含む）の直後、埋め草の手前。
+   *   仕様書p.21の図「データ部｜管理部｜拡張データ部｜埋｜訂正データ部」と一致する。
+   * ------------------------------------------------------------------------- */
+  var PADDING_EXT_LENGTH_BITS = 16;
+  var PADDING_EXT_MAX_BYTES = 65535;
+
+  /** paddingExt の値から「拡張データ部を持つLQR番号」を返す。持たないなら null。 */
+  function paddingExtHolderLqr(paddingExt) {
+    if (paddingExt === 1) return 2;   // 01: LQR2 に LQR1 の余りを収容
+    if (paddingExt === 2) return 1;   // 10: LQR1 に LQR2 の余りを収容
+    return null;
+  }
+  /** paddingExt の値から「余りデータの出どころ（収容元）のLQR番号」を返す。 */
+  function paddingExtSourceLqr(paddingExt) {
+    if (paddingExt === 1) return 1;
+    if (paddingExt === 2) return 2;
+    return null;
+  }
+
+  /** 鍵ストリームでXORする（暗号化・復号の両方に使う。2回かけると元に戻る） */
+  function xorWithMask(bytes, maskBytes) {
+    var n = bytes.length;
+    var out = (typeof Uint8Array !== "undefined" && bytes instanceof Uint8Array)
+      ? new Uint8Array(n) : new Array(n);
+    if (!maskBytes || !maskBytes.length) {
+      for (var k = 0; k < n; k++) out[k] = bytes[k] & 0xFF;
+      return out;
+    }
+    for (var i = 0; i < n; i++) {
+      out[i] = (bytes[i] ^ maskBytes[i % maskBytes.length]) & 0xFF;
+    }
+    return out;
+  }
+
+  /**
+   * ★同一データ4色QR（1001＋sameData）の符号化で使う、バイト列のビット逆転。
+   *
+   *   仕様書（2026.08.09）6.2「４色QRコードの符号化」より。
+   *     ステップ1 データ部（埋め草含む）のビット列を逆順に並べ替える
+   *     ステップ2 その データに対して RS符号の誤り訂正データを作成
+   *     ステップ3 RS符号のデータ全体のビットの並びを逆転する
+   *
+   *   ビット列全体を逆順にするので、バイト順を反転し、さらに各バイト内の
+   *   ビットも反転する。長さが変わらないため、2回かけると元へ戻る。
+   */
+  function bitReverseBytes(bytes) {
+    var n = bytes.length;
+    var out = (typeof Uint8Array !== "undefined" && bytes instanceof Uint8Array)
+      ? new Uint8Array(n) : new Array(n);
+    for (var i = 0; i < n; i++) {
+      var v = bytes[n - 1 - i] & 0xFF;
+      // バイト内のビット反転（8ビット）
+      v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4);
+      v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2);
+      v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1);
+      out[i] = v & 0xFF;
+    }
+    return out;
+  }
+
   /** 色番号(0..7)から各プレーンの明暗へ戻す（読取側の逆変換） */
   function colorIndexToPlanes(colorIndex, planeCount, colorSpec) {
     var bits, i, v;
@@ -764,6 +1000,23 @@
     dataModuleOrder: dataModuleOrder,
     reversedModuleOrder: reversedModuleOrder,
     needsReversedSecondPlane: needsReversedSecondPlane,
+    bitReverseBytes: bitReverseBytes,
+    USER_ID_BITS: USER_ID_BITS,
+    USER_ID_COUNTRIES: USER_ID_COUNTRIES,
+    userIdCountryByName: userIdCountryByName,
+    userIdCountryByCode: userIdCountryByCode,
+    userIdIndividualMax: userIdIndividualMax,
+    composeUserId: composeUserId,
+    parseUserId: parseUserId,
+    SYSTEM_PASSWORD: SYSTEM_PASSWORD,
+    PADDING_PASSWORD: PADDING_PASSWORD,
+    webDataMaskSpec: webDataMaskSpec,
+    paddingMaskSpec: paddingMaskSpec,
+    PADDING_EXT_LENGTH_BITS: PADDING_EXT_LENGTH_BITS,
+    PADDING_EXT_MAX_BYTES: PADDING_EXT_MAX_BYTES,
+    paddingExtHolderLqr: paddingExtHolderLqr,
+    paddingExtSourceLqr: paddingExtSourceLqr,
+    xorWithMask: xorWithMask,
     groupPlanesByPqr: groupPlanesByPqr,
     EXT_MAX_BITS: EXT_MAX_BITS,
     FIELDS: FIELDS,
@@ -782,6 +1035,12 @@
     webDataKindLabel: webDataKindLabel,
     webDataLqrOf: webDataLqrOf,
     webDataSupport: webDataSupport,
+    WEB_DATA_ID_USER_BITS: WEB_DATA_ID_USER_BITS,
+    WEB_DATA_ID_ITEM_BITS: WEB_DATA_ID_ITEM_BITS,
+    WEB_DATA_ID_USER_MAX: WEB_DATA_ID_USER_MAX,
+    WEB_DATA_ID_ITEM_MAX: WEB_DATA_ID_ITEM_MAX,
+    composeWebDataId: composeWebDataId,
+    parseWebDataId: parseWebDataId,
     buildMgmt48: buildMgmt48,
     parseMgmt48: parseMgmt48,
     buildMgmtExt: buildMgmtExt,
