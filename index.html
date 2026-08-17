@@ -78,9 +78,10 @@
         .qr-data-card .text { font-size: 1.1rem; color: #fff; word-break: break-all; font-family: monospace; }
         .qr-data-card .text a { color: #64B5F6; text-decoration: underline; }
         .qr-data-card .mgmt { font-size: 0.8rem; color: #4CAF50; font-family: monospace; margin-top: 4px; }
-        #resultScreen { justify-content: flex-start; overflow-y: auto; }
+        /* ★Ver3.1：読取デバッグ表示を外したので、結果は上下方向の中央へ置く。
+           項目が多いときはボックス内でスクロールさせ、中央配置を保つ。 */
+        #resultScreen { justify-content: center; }
         #resultScreen .overlay-box { max-height: calc(100dvh - 40px); overflow-y: auto; max-width: 520px; }
-        #scanStatsText { max-height: 34dvh; overflow-y: auto; overflow-x: auto; font-size: 0.82rem; line-height: 1.35; word-break: normal; white-space: pre; }
         #newColorScanStatsText {
             height: 12rem;
             max-height: 34dvh;
@@ -106,7 +107,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader39</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -129,12 +130,6 @@
                 <button class="btn" id="startScanBtn">スキャン開始</button>
                 <button class="btn" id="colorEncModeBtn" style="background-color:#00897B; display:none;">カラー符号化モード</button>
                 <button class="btn secondary" id="logoutBtn" style="margin-top:10px; font-size:0.9rem;">端末情報を変更</button>
-                <!-- ★ 読取デバッグログ（蓄積）操作 -->
-                <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
-                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px;" onclick="copyAllDebugLog()">デバッグログコピー</button>
-                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; background-color:#7f1d1d; border-color:#a33;" onclick="confirmClearDebugLog()">デバッグログ削除</button>
-                </div>
-                <div id="debugLogCountLabel" style="margin-top:6px; font-size:0.8rem; color:#aaa;">蓄積ログ 0 件</div>
             </div>
         </div>
     </div>
@@ -235,7 +230,9 @@
 
     <!-- 最終結果画面 -->
     <div class="overlay-screen" id="resultScreen">
-        <div class="overlay-box" style="gap: 20px;">
+        <!-- ★Ver3.1：読取デバッグ表示を外したので、内容を上下方向の中央へ置く。
+             項目が多いときはボックス内でスクロールさせ、中央配置を保つ。 -->
+        <div class="overlay-box" style="gap: 20px; max-height: 90dvh; overflow-y: auto;">
             <h2 id="resultTitle">ファイルのパスワードFは以下です</h2>
             <!-- 通常モード表示 -->
             <div id="normalResultSection">
@@ -272,11 +269,6 @@
             <div id="userIdCard" class="qr-data-card" style="border-color: #BA68C8; margin-top:12px; display:none;">
                 <label style="color:#BA68C8;">ユーザーID</label>
                 <div class="text" id="userIdText">-</div>
-            </div>
-            <div class="qr-data-card" id="scanStatsCard" style="border-color:#FF1744; margin-top:12px;">
-                <label style="color:#FF1744;">読取デバッグ情報</label>
-                <div class="text" id="scanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
-                <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">コピー</button>
             </div>
             <button class="btn" onclick="restartScan()">もう一度スキャン</button>
         </div>
@@ -2357,7 +2349,13 @@
         // 現在の読取（1試行）の計測を、蓄積ログへ1レコード追記する。
         // 完了画面表示 or 20秒タイムアウト時に呼ぶ。二重追記は _logged フラグで防止。
         // 返り値: 追記したレコードのID（スキップ時は null）。
+        // ★Ver3.1：蓄積ログは保存しない。
+        //   トップ画面のコピー／削除ボタンと件数表示を廃止したため、
+        //   localStorage へ溜め続ける意味が無くなった。呼び出し側は残したまま何もしない。
+        const DEBUG_LOG_ENABLED = false;
+
         function appendCurrentTrialToLog() {
+            if (!DEBUG_LOG_ENABLED) return null;
             const stats = getScanDebugStats();
             if (!stats || stats._logged) return null;
             const isTimeout = !!stats._timeout;
@@ -2881,6 +2879,7 @@
                 managementFlags16: res.managementFlags16,
                 creationDateTimeExt32: res.creationDateTimeExt32,
                 managementExt32: res.managementExt32,
+                imageIdExt32: res.imageIdExt32,
                 expiryExt32: res.expiryExt32,
                 readerIdExt32: res.readerIdExt32,
                 userIdExt32: res.userIdExt32,
@@ -3456,6 +3455,7 @@
                     managementFlags16: res.managementFlags16,
                     creationDateTimeExt32: res.creationDateTimeExt32,
                     managementExt32: res.managementExt32,
+                    imageIdExt32: res.imageIdExt32,
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
@@ -3807,6 +3807,7 @@
                             managementFlags16: _comb.managementFlags16,
                             creationDateTimeExt32: _comb.creationDateTimeExt32,
                             managementExt32: _comb.managementExt32,
+                            imageIdExt32: _comb.imageIdExt32,
                             expiryExt32: _comb.expiryExt32,
                             readerIdExt32: _comb.readerIdExt32,
                             userIdExt32: _comb.userIdExt32,
@@ -4667,6 +4668,7 @@
                     managementFlags16: res.managementFlags16,
                     creationDateTimeExt32: res.creationDateTimeExt32,
                     managementExt32: res.managementExt32,
+                    imageIdExt32: res.imageIdExt32,
                     expiryExt32: res.expiryExt32,
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
@@ -4712,6 +4714,7 @@
                         managementFlags16: decoded.managementFlags16,
                         creationDateTimeExt32: decoded.creationDateTimeExt32,
                         managementExt32: decoded.managementExt32,
+                        imageIdExt32: decoded.imageIdExt32,
                         expiryExt32: decoded.expiryExt32,
                         readerIdExt32: decoded.readerIdExt32,
                         userIdExt32: decoded.userIdExt32,
@@ -4947,8 +4950,8 @@
             const sigS = signBytes.slice(22, 42);
 
             // 画像データIDを第1QRの拡張管理部32bitから取得
-            const imageDataId = firstQR.managementExt32 || 0;
-            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
+            const imageDataId = getImageDataIdOf(firstQR) || 0;
+            const hasImageDataId = getImageDataIdOf(firstQR) !== null;
 
             // (2) 第1QRの全コード語（RS訂正済み再インタリーブ）でハッシュ計算と検証
             try {
@@ -5188,6 +5191,18 @@
             renderResultText(textId, info.parts
                 ? `データID ${info.id32}（ユーザID ${info.parts.userId} ＋ 個別データID ${info.parts.itemId}）`
                 : 'データIDが読み取れませんでした');
+        }
+
+        // ★Ver3.1：画像データID（32ビット）の取り出し。
+        //   jsQR は hasImageId のとき imageIdExt32 へ入れるが、読取側は長らく
+        //   managementExt32（一度も設定されない名前）を見ていたため、
+        //   画像が表示されることが無かった。両方を見て、あるものを使う。
+        function getImageDataIdOf(meta) {
+            if (!meta) return null;
+            const v = (meta.imageIdExt32 !== undefined && meta.imageIdExt32 !== null)
+                ? meta.imageIdExt32
+                : meta.managementExt32;
+            return (v === undefined || v === null) ? null : (v >>> 0);
         }
 
         function renderImageDataId(containerId, imageId, imageDataId, hasImageDataId) {
@@ -9435,6 +9450,7 @@
                 managementCode32: firstQR.managementCode32,
                 managementFlags16: firstQR.managementFlags16,
                 managementExt32: firstQR.managementExt32,
+                imageIdExt32: firstQR.imageIdExt32,
                 expiryExt32: firstQR.expiryExt32,
                 readerIdExt32: firstQR.readerIdExt32,
                 userIdExt32: firstQR.userIdExt32,
@@ -9579,9 +9595,9 @@
         }
 
         function verifyNewColorSignature(signatureText, payloadText, q1Meta, signedCodewordArrays = null) {
-            const hasImageDataId = !!(q1Meta && q1Meta.managementExt32);
+            const hasImageDataId = getImageDataIdOf(q1Meta) !== null;
             if (!signatureText) {
-                return { verified: false, senderName: '署名データなし', imageDataId: q1Meta && q1Meta.managementExt32 ? q1Meta.managementExt32 : 0, hasImageDataId };
+                return { verified: false, senderName: '署名データなし', imageDataId: getImageDataIdOf(q1Meta) || 0, hasImageDataId };
             }
 
             try {
@@ -9602,14 +9618,14 @@
                     verified,
                     senderName,
                     keyId,
-                    imageDataId: q1Meta && q1Meta.managementExt32 ? q1Meta.managementExt32 : 0,
+                    imageDataId: getImageDataIdOf(q1Meta) || 0,
                     hasImageDataId
                 };
             } catch (err) {
                 return {
                     verified: false,
                     senderName: '署名解析エラー',
-                    imageDataId: q1Meta && q1Meta.managementExt32 ? q1Meta.managementExt32 : 0,
+                    imageDataId: getImageDataIdOf(q1Meta) || 0,
                     hasImageDataId
                 };
             }
@@ -9785,7 +9801,7 @@
             renderImageDataId(
                 'newColorImageContainer',
                 'newColorImage',
-                q1Meta ? q1Meta.managementExt32 : null,
+                getImageDataIdOf(q1Meta),
                 !!(mgmtInfo && mgmtInfo.hasImageId)
             );
 
@@ -9801,12 +9817,9 @@
         async function scanLoop() {
             if (!isScanning) return;
 
-            // ★ 20秒タイムアウト判定（読取開始からの経過）。中間画面中は isScanning=false なので進まない。
+            // ★Ver3.1：読取のタイムアウトは設けない（従来は20秒で打ち切っていた）。
+            //   経過時間は計測のために持ち続ける。
             if (!twinReadStartedAt) twinReadStartedAt = nowPerf();
-            if (nowPerf() - twinReadStartedAt >= SCAN_TIMEOUT_MS) {
-                handleScanTimeout();
-                return;
-            }
 
             if (video.videoWidth && overlayCanvas.width !== video.videoWidth) {
                 overlayCanvas.width = video.videoWidth;
@@ -9970,6 +9983,7 @@
                                         managementCode32: q1Found.managementCode32,
                                         managementFlags16: q1Found.managementFlags16,
                                         managementExt32: q1Found.managementExt32,
+                                        imageIdExt32: q1Found.imageIdExt32,
                                         mgmtInfo: mgmtInfo,
                                         creationDateTimeExt32: q1Found.creationDateTimeExt32,
                                         readLimitBits: q1Found.readLimitBits,
@@ -10244,6 +10258,7 @@
                                                 managementFlags16: _it.managementFlags16,
                                                 creationDateTimeExt32: _it.creationDateTimeExt32,
                                                 managementExt32: _it.managementExt32,
+                                                imageIdExt32: _it.imageIdExt32,
                                                 expiryExt32: _it.expiryExt32,
                                                 readerIdExt32: _it.readerIdExt32,
                                                 userIdExt32: _it.userIdExt32,
@@ -10296,6 +10311,7 @@
                                                     managementFlags16: _it.managementFlags16,
                                                     creationDateTimeExt32: _it.creationDateTimeExt32,
                                                     managementExt32: _it.managementExt32,
+                                                    imageIdExt32: _it.imageIdExt32,
                                                     expiryExt32: _it.expiryExt32,
                                                     readerIdExt32: _it.readerIdExt32,
                                                     userIdExt32: _it.userIdExt32,
@@ -10673,6 +10689,7 @@
                                                     managementFlags16: cropRes.managementFlags16,
                                             creationDateTimeExt32: cropRes.creationDateTimeExt32,
                                             managementExt32: cropRes.managementExt32,
+                                            imageIdExt32: cropRes.imageIdExt32,
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
                                             userIdExt32: cropRes.userIdExt32,
@@ -10755,6 +10772,7 @@
                                             managementFlags16: cropRes.managementFlags16,
                                             creationDateTimeExt32: cropRes.creationDateTimeExt32,
                                             managementExt32: cropRes.managementExt32,
+                                            imageIdExt32: cropRes.imageIdExt32,
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
                                             userIdExt32: cropRes.userIdExt32,
@@ -10846,6 +10864,7 @@
                                         managementFlags16: r.managementFlags16,
                                         creationDateTimeExt32: r.creationDateTimeExt32,
                                         managementExt32: r.managementExt32,
+                                        imageIdExt32: r.imageIdExt32,
                                         expiryExt32: r.expiryExt32,
                                         readerIdExt32: r.readerIdExt32,
                                         userIdExt32: r.userIdExt32,
@@ -10930,6 +10949,7 @@
                                     managementFlags16: r.managementFlags16,
                                     creationDateTimeExt32: r.creationDateTimeExt32,
                                     managementExt32: r.managementExt32,
+                                    imageIdExt32: r.imageIdExt32,
                                     expiryExt32: r.expiryExt32,
                                     readerIdExt32: r.readerIdExt32,
                                     userIdExt32: r.userIdExt32,
@@ -10996,6 +11016,7 @@
                                         managementFlags16: resFull.managementFlags16,
                                         creationDateTimeExt32: resFull.creationDateTimeExt32,
                                         managementExt32: resFull.managementExt32,
+                                        imageIdExt32: resFull.imageIdExt32,
                                         expiryExt32: resFull.expiryExt32,
                                         readerIdExt32: resFull.readerIdExt32,
                                         userIdExt32: resFull.userIdExt32,
@@ -11096,6 +11117,7 @@
                                     managementFlags16: combined.managementFlags16,
                                     creationDateTimeExt32: combined.creationDateTimeExt32,
                                     managementExt32: combined.managementExt32,
+                                    imageIdExt32: combined.imageIdExt32,
                                     expiryExt32: combined.expiryExt32,
                                     readerIdExt32: combined.readerIdExt32,
                                     userIdExt32: combined.userIdExt32,
@@ -11189,6 +11211,7 @@
                                         managementCode32: item.managementCode32,
                                         managementFlags16: item.managementFlags16,
                                         managementExt32: item.managementExt32,
+                                        imageIdExt32: item.imageIdExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
@@ -11277,6 +11300,7 @@
                                 managementCode32: item.managementCode32,
                                 managementFlags16: item.managementFlags16,
                                 managementExt32: item.managementExt32,
+                                imageIdExt32: item.imageIdExt32,
                                 expiryExt32: item.expiryExt32,
                                 readerIdExt32: item.readerIdExt32,
                                 userIdExt32: item.userIdExt32,
@@ -11486,6 +11510,7 @@
                                         managementCode32: item.managementCode32,
                                         managementFlags16: item.managementFlags16,
                                         managementExt32: item.managementExt32,
+                                        imageIdExt32: item.imageIdExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
