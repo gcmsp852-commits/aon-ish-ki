@@ -323,6 +323,11 @@
                 <label style="color:#FFD54F;">電子署名検証</label>
                 <div class="text" id="newColorVerifyText" style="text-align:left;">-</div>
             </div>
+            <!-- ★Ver3.1：署名した鍵の所有者。通常モードの dsAuthKey と同じ内容を出す。 -->
+            <div id="newColorAuthKeyCard" class="qr-data-card" style="border-color: #FFD54F; display:none;">
+                <label style="color:#FFD54F;">認証鍵</label>
+                <div class="text" id="newColorAuthKey">-</div>
+            </div>
             <div id="newColorCreationDateCard" class="qr-data-card" style="border-color: #81C784; display:none;">
                 <label style="color:#81C784;">QRツイン作成日時</label>
                 <div class="text" id="newColorCreationDateText">-</div>
@@ -9673,6 +9678,14 @@
                 verifyCard.style.borderColor = verifyInfo.verified ? '#4CAF50' : '#F44336';
                 verifyText.style.color = verifyInfo.verified ? '#4CAF50' : '#F44336';
                 renderResultText('newColorVerifyText', buildDigitalSignatureMessage(verifyInfo));
+                // ★Ver3.1：認証鍵（署名した鍵の所有者）も出す。
+                //   従来はカード自体が無く、カラーQR・単一QRでは所有者が分からなかった。
+                const authCard = document.getElementById('newColorAuthKeyCard');
+                if (authCard) authCard.style.display = '';
+                renderResultText('newColorAuthKey', verifyInfo.senderName || null);
+            } else {
+                const authCard = document.getElementById('newColorAuthKeyCard');
+                if (authCard) authCard.style.display = 'none';
             }
 
             renderResultText('newColorRes1', q1Text || null);
