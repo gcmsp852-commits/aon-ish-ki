@@ -212,7 +212,7 @@
                 <div id="dsVerifyCard" class="qr-data-card" style="margin-top:12px;">
                     <div id="dsVerifyText" style="font-size:1.2rem; font-weight:bold; text-align:left; padding:10px 0;"></div>
                 </div>
-                <div class="qr-data-card" style="border-color: #FFD54F; margin-top:12px;">
+                <div class="qr-data-card" id="dsAuthKeyCard" style="border-color: #FFD54F; margin-top:12px; display:none;">
                     <label style="color:#FFD54F;">認証鍵</label>
                     <div class="text" id="dsAuthKey">-</div>
                 </div>
@@ -5251,18 +5251,29 @@
                 }
                 renderResultText('dsVerifyText', buildDigitalSignatureMessage(digitalSignResult));
 
-                // 認証鍵（組織名）
-                renderResultText('dsAuthKey', digitalSignResult.senderName || null);
+                // ★Ver3.1：認証に失敗したときは、認証鍵も画像も出さない。
+                //   署名が検証できていない以上、鍵の所有者も紐づく画像も信用できないため。
+                const authCard = document.getElementById('dsAuthKeyCard');
+                if (digitalSignResult.verified) {
+                    if (authCard) authCard.style.display = '';
+                    renderResultText('dsAuthKey', digitalSignResult.senderName || null);
+                } else {
+                    if (authCard) authCard.style.display = 'none';
+                    renderResultText('dsAuthKey', null);
+                }
                 renderCreationDateCard('dsCreationDateCard', 'dsCreationDateTime', firstQR ? firstQR.creationDateTimeExt32 : null);
 
-                // 画像データID → 画像表示
+                // 画像データID → 画像表示（認証できたときだけ）
                 const imgId = digitalSignResult.imageDataId;
-                if (digitalSignResult.hasImageDataId && imgId && imgId >= 1 && imgId <= 10) {
+                if (digitalSignResult.verified && digitalSignResult.hasImageDataId
+                    && imgId && imgId >= 1 && imgId <= 10) {
                     imgEl.src = 'ID' + imgId + '.png';
                     imgEl.alt = '画像データ ID' + imgId;
                     imgEl.onerror = function() { imgContainer.style.display = 'none'; };
                     imgContainer.style.display = '';
                 } else {
+                    imgEl.onerror = null;
+                    imgEl.removeAttribute('src');
                     imgContainer.style.display = 'none';
                 }
             } else {
@@ -9678,11 +9689,16 @@
                 verifyCard.style.borderColor = verifyInfo.verified ? '#4CAF50' : '#F44336';
                 verifyText.style.color = verifyInfo.verified ? '#4CAF50' : '#F44336';
                 renderResultText('newColorVerifyText', buildDigitalSignatureMessage(verifyInfo));
-                // ★Ver3.1：認証鍵（署名した鍵の所有者）も出す。
-                //   従来はカード自体が無く、カラーQR・単一QRでは所有者が分からなかった。
+                // ★Ver3.1：認証鍵（署名した鍵の所有者）。認証できたときだけ出す。
+                //   検証に失敗した署名の所有者を見せると、正当なものと誤解されるため。
                 const authCard = document.getElementById('newColorAuthKeyCard');
-                if (authCard) authCard.style.display = '';
-                renderResultText('newColorAuthKey', verifyInfo.senderName || null);
+                if (verifyInfo.verified) {
+                    if (authCard) authCard.style.display = '';
+                    renderResultText('newColorAuthKey', verifyInfo.senderName || null);
+                } else {
+                    if (authCard) authCard.style.display = 'none';
+                    renderResultText('newColorAuthKey', null);
+                }
             } else {
                 const authCard = document.getElementById('newColorAuthKeyCard');
                 if (authCard) authCard.style.display = 'none';
@@ -9718,12 +9734,17 @@
                     }
                 }
             }
-            renderImageDataId(
-                'newColorImageContainer',
-                'newColorImage',
-                getImageDataIdOf(q1Meta),
-                !!(mgmtInfo && mgmtInfo.hasImageId)
-            );
+            // ★Ver3.1：画像は「署名の検証に成功したときだけ」出す。
+            //   署名構成でないとき（verifyInfo が無いとき）は従来どおり画像IDの有無で判断する。
+            {
+                const imageAllowed = verifyInfo ? !!verifyInfo.verified : true;
+                renderImageDataId(
+                    'newColorImageContainer',
+                    'newColorImage',
+                    getImageDataIdOf(q1Meta),
+                    imageAllowed && !!(mgmtInfo && mgmtInfo.hasImageId)
+                );
+            }
 
             markScanCompleted(isNewColorStageComplete(qRegionMeta, mgmtInfo) ? 'completed' : 'incomplete');
             twinReadStartedAt = 0;
